@@ -2,6 +2,11 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.6.3] - 2026-06-22
+
+### Fixed
+- **CPU spin at idle**: `StdIn.ReadLine` does not block in Xojo's `ConsoleApplication` — it busy-spins when no data is available, causing ~100% CPU usage at idle. Replaced the `While True` / `ReadLine` loop with a `DoEvents(10)`-based loop that accumulates data from `StdIn.ReadAll` into a buffer and processes complete newline-terminated lines as they arrive. Idle CPU usage drops from ~100% to ~1%.
+
 ## [1.6.2] - 2026-06-22
 
 ### Changed
