@@ -2,6 +2,11 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.6.2] - 2026-06-22
+
+### Changed
+- **`XOJO_IPCPATH` environment variable support**: XMCP now reads the `XOJO_IPCPATH` environment variable when locating the IDE's IPC socket, consistent with the Xojo IDE Scripting API documentation. If the variable contains a full path it is used directly; if it contains only a filename, `/tmp/` is prepended. Falls back to the standard `/tmp/XojoIDE` and `/private/tmp/XojoIDE` locations when the variable is not set.
+
 ## [1.6.1] - 2026-06-16
 
 ### Changed
