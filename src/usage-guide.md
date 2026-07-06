@@ -98,9 +98,17 @@ Once in place, use `get_debug_log` after a crash **in a built app** to retrieve 
 
 ## How to edit code
 
-**Always edit source files directly on disk** — for both `.xojo_code` and `.xojo_window` files. Do not use `get_code` or `set_code` to write code.
+**Always edit source files directly on disk** — for both `.xojo_code` and `.xojo_window` files. This is the primary editing path, not a fallback.
 
-The only exception is when the user explicitly asks you to read or edit code they have selected in the IDE. In that case, `get_code` and `set_code` without a location parameter work reliably. After writing with `set_code`, always remind the user to save the project (Cmd+S) — `set_code` writes to the IDE editor but does not save to disk.
+The workflow is exactly two steps:
+1. Edit the file on disk (using your client's own `Edit`/`Write` tools)
+2. Call `revert_project` to reload it in the IDE
+
+**Do not route edits through `run_ide_script` + `DoShellCommand` + Python/sed.** That path exists as a last resort; it adds fragile quoting, whitespace-sensitivity, and encoding failure modes that the direct approach avoids entirely. If you find yourself writing a shell script to modify a Xojo source file, stop and use your file editing tools instead.
+
+**Do not use `set_code` to write code** — it only covers top-level navigable items, cannot target individual methods, and does not work at all for `.xojo_window` files.
+
+The only exception is when the user explicitly asks you to read or edit code they have selected in the IDE. In that case, `get_code` and `set_code` without a location parameter work reliably for reading the current selection or replacing it. After writing with `set_code`, always remind the user to save the project (Cmd+S) — `set_code` writes to the IDE editor but does not save to disk.
 
 ---
 

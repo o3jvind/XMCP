@@ -13,6 +13,7 @@ Protected Class IDECommunicator
 		Private Function CandidateSocketPaths() As String()
 		  Var paths() As String
 		  paths.Add(mSocketPath)
+		  paths.Add(EnvironmentIPCPath())
 		  paths.Add("/tmp/XojoIDE")
 		  paths.Add("/private/tmp/XojoIDE")
 		  
@@ -37,10 +38,21 @@ Protected Class IDECommunicator
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function FindIPCPath() As String
-		  // Try standard locations for the IPC socket.
-		  Var paths() As String = Array("/tmp/XojoIDE", "/private/tmp/XojoIDE")
+		Private Function EnvironmentIPCPath() As String
+		  Var envPath As String = System.EnvironmentVariable("XOJO_IPCPATH").Trim
+		  If envPath = "" Then Return ""
+		  If envPath.IndexOf("/") >= 0 Then Return envPath
+		  Return "/tmp/" + envPath
+		End Function
+	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Function FindIPCPath() As String
+		  // Honour XOJO_IPCPATH if set, then fall back to standard locations.
+		  Var envPath As String = EnvironmentIPCPath()
+		  If envPath <> "" Then Return envPath
+
+		  Var paths() As String = Array("/tmp/XojoIDE", "/private/tmp/XojoIDE")
 		  For Each p As String In paths
 		    Var f As New FolderItem(p, FolderItem.PathModes.Native)
 		    If f <> Nil And f.Exists Then Return p

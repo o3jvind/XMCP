@@ -4,7 +4,7 @@ Inherits ConsoleApplication
 	#tag Event
 		Function Run(args() as String) As Integer
 		  CommandLineParser = New MCPKit.OptionParser("")
-		  
+
 		  WillParseOptions
 		  
 		  Try
@@ -24,58 +24,67 @@ Inherits ConsoleApplication
 		  RaiseEvent Configure
 		  
 		  If Verbose Then System.DebugLog(Name + " starting...")
-		  
-		  While True
+
+		  // DoEvents-based read loop. ConsoleApplication has no event loop, so
+		  // StdIn.ReadLine does not block — it busy-spins. Instead we use DoEvents
+		  // (which sleeps for its duration) and accumulate data from StdIn.ReadAll
+		  // into a buffer, processing complete newline-terminated lines as they arrive.
+		  Var stdinBuffer As String = ""
+
+		  Do
+		    App.DoEvents(10)
+
+		    If StdIn.EndOfFile Then Quit
+
 		    Try
-		      // Read from stdin (blocks until a line arrives).
-		      Var inputLine As String = StdIn.ReadLine
-		      // EOF: client process has closed stdin — exit cleanly.
-		      If StdIn.EndOfFile Then Quit
-		      If inputLine = "" Then Continue
-		      
-		      If Verbose Then System.DebugLog(Name + " received: " + inputLine)
-		      
-		      // Parse the input (which should be a JSON-RPC request) into a JSONItem.
-		      Var request As New JSONItem(inputLine)
-		      
-		      // Get the request ID. Notifications do not include an ID.
-		      If request.HasKey("id") Then
-		        RequestID = request.Value("id")
-		      Else
-		        RequestID = Nil
-		        // Could be a notification...
-		        If request.HasKey("method") = False Or _
-		          request.Value("method").StringValue.BeginsWith("notifications/") = False Then
-		          // Not a notification so it must be an error.
-		          MCPKit.Error(Nil, MCPKit.ErrorTypes.InvalidRequest, "Missing `id` in request.")
-		          If Verbose Then System.DebugLog("Missing `id` in request.")
-		          Continue
-		        End If
+		      Var chunk As String = StdIn.ReadAll
+		      If chunk <> "" Then
+		        stdinBuffer = stdinBuffer + chunk
+
+		        Var nlPos As Integer = stdinBuffer.IndexOf(Chr(10))
+		        While nlPos >= 0
+		          Var inputLine As String = stdinBuffer.Left(nlPos).Trim
+		          stdinBuffer = stdinBuffer.Middle(nlPos + 1)
+		          nlPos = stdinBuffer.IndexOf(Chr(10))
+
+		          If inputLine = "" Then Continue
+
+		          If Verbose Then System.DebugLog(Name + " received: " + inputLine)
+
+		          Try
+		            Var request As New JSONItem(inputLine)
+
+		            If request.HasKey("id") Then
+		              RequestID = request.Value("id")
+		            Else
+		              RequestID = Nil
+		              If request.HasKey("method") = False Or _
+		                request.Value("method").StringValue.BeginsWith("notifications/") = False Then
+		                MCPKit.Error(Nil, MCPKit.ErrorTypes.InvalidRequest, "Missing `id` in request.")
+		                If Verbose Then System.DebugLog("Missing `id` in request.")
+		                Continue
+		              End If
+		            End If
+
+		            Var response As JSONItem = ProcessRequest(request)
+		            If response <> Nil Then
+		              Print(response.ToString)
+		              stdout.Flush
+		            End If
+
+		          Catch e As JSONException
+		            MCPKit.Error(RequestID, MCPKit.ErrorTypes.ParseError, "JSON parsing error: " + e.Message)
+		          Catch e As RuntimeException
+		            MCPKit.Error(RequestID, MCPKit.ErrorTypes.ServerError, "Unexpected runtime exception: " + e.Message)
+		            If Verbose Then System.DebugLog("Error: " + e.Message)
+		          End Try
+		        Wend
 		      End If
-		      
-		      // Process the request into a JSON response.
-		      Var response As JSONItem = ProcessRequest(request)
-		      
-		      If response <> Nil Then
-		        // Send our response to stdout so the client can use it.
-		        Print(response.ToString)
-		        stdout.Flush
-		      End If
-		      
+
 		    Catch e As IOException
-		      // I/O error on stdin — exit cleanly.
 		      Quit
-		      
-		    Catch e As JSONException
-		      
-		      MCPKit.Error(RequestID, MCPKit.ErrorTypes.ParseError, "JSON parsing error: " + e.Message)
-		      
-		    Catch e As RuntimeException
-		      
-		      MCPKit.Error(RequestID, MCPKit.ErrorTypes.ServerError, "Unexpected runtime exception: " + e.Message)
-		      If Verbose Then System.DebugLog("Error: " + e.Message)
 		    End Try
-		  Wend
+		  Loop
 		  
 		End Function
 	#tag EndEvent
