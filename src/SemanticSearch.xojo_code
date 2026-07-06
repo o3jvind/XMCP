@@ -2,9 +2,14 @@
 Protected Class SemanticSearch
 	#tag Method, Flags = &h0
 		Sub Constructor(embeddingUrl As String, dbPath As String)
+		  // Task 13: the DB connection and the embedding server are independent
+		  // tiers. A reachable DB alone enables keyword (BM25) search; the
+		  // embedding server upgrades it to hybrid semantic search. The DB is
+		  // therefore kept open even when the server is down.
 		  mEmbeddingUrl = embeddingUrl
 		  mDbPath = dbPath
 		  mAvailable = False
+		  mHasDatabase = False
 
 		  Var dbFile As New FolderItem(dbPath, FolderItem.PathModes.Native)
 		  If dbFile = Nil Or Not dbFile.Exists Then Return
@@ -20,6 +25,7 @@ Protected Class SemanticSearch
 
 		  // Performance pragmas: WAL mode for non-blocking reads, memory-mapped I/O,
 		  // and a 64 MB page cache so the embedding BLOBs stay warm between searches.
+		  // XDOX (the writer) may be indexing concurrently; WAL makes reads safe.
 		  Try
 		    mDB.ExecuteSQL("PRAGMA journal_mode=WAL")
 		    mDB.ExecuteSQL("PRAGMA mmap_size=268435456")
@@ -28,17 +34,147 @@ Protected Class SemanticSearch
 		    // Non-fatal; continue with defaults.
 		  End Try
 
-		  // Probe the embedding server.
-		  Var testEmb As MemoryBlock = FetchEmbedding("test")
-		  If testEmb = Nil Then
-		    mDB.Close
-		    mDB = Nil
+		  mHasDatabase = True
+		  ReadMetadata
+
+		  // Validate embedding compatibility: the cosine path assumes 768-dim
+		  // nomic float32 BLOBs. A DB built with another model must not be
+		  // scored semantically — keyword search still works.
+		  If mEmbeddingDim > 0 And mEmbeddingDim <> 768 Then
+		    System.DebugLog("SemanticSearch: DB uses " + mEmbeddingDim.ToString + "-dim embeddings (expected 768) — semantic tier disabled.")
 		    Return
 		  End If
+
+		  // Probe the embedding server with a short timeout so a down server
+		  // degrades to keyword search instantly instead of hanging.
+		  Var testEmb As MemoryBlock = FetchEmbedding("test", 2000)
+		  If testEmb = Nil Then Return
 
 		  mAvailable = True
 
 		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function HasDatabase() As Boolean
+		  Return mHasDatabase
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function DocsVersion() As String
+		  Return mDocsVersion
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub ReadMetadata()
+		  // The metadata table exists in XDOX DBs and indexer DBs >= 0.2.0;
+		  // its absence just means "no validation possible".
+		  Try
+		    Var rs As RowSet = mDB.SelectSQL("SELECT key, value FROM metadata")
+		    Do Until rs.AfterLastRow
+		      Select Case rs.Column("key").StringValue
+		      Case "embedding_dim"
+		        mEmbeddingDim = rs.Column("value").StringValue.ToInteger
+		      Case "docs_version"
+		        mDocsVersion = rs.Column("value").StringValue
+		      End Select
+		      rs.MoveToNextRow
+		    Loop
+		    rs.Close
+		  Catch e As DatabaseException
+		    // No metadata table — legacy DB, carry on.
+		  End Try
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function KeywordSearch(query As String, maxResults As Integer) As String
+		  // BM25-only tier: works with just the DB file, no embedding server.
+		  // Replaces the old llms-full.txt substring scan as the primary fallback.
+		  If mDB = Nil Then Return ""
+
+		  Var safe As String = SanitizeFTSQuery(query)
+		  If safe = "" Then Return ""
+
+		  Var results() As String
+		  Try
+		    Var rs As RowSet = mDB.SelectSQL( _
+		      "SELECT c.title, c.chunk_text, c.prev_id, c.next_id, bm25(chunks_fts) AS score " _
+		      + "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid " _
+		      + "WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?", safe, maxResults)
+		    Do Until rs.AfterLastRow
+		      results.Add("--- " + rs.Column("title").StringValue + " ---" + EndOfLine + rs.Column("chunk_text").StringValue)
+		      rs.MoveToNextRow
+		    Loop
+		    rs.Close
+		  Catch e As DatabaseException
+		    Return ""
+		  End Try
+
+		  If results.Count = 0 Then Return ""
+
+		  Var header As String = "Found " + results.Count.ToString + " result(s) for """ + query + """ (keyword"
+		  If mDocsVersion <> "" Then header = header + ", " + mDocsVersion
+		  header = header + "):"
+		  Return header + EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function SearchNotesKeyword(query As String, maxResults As Integer) As String
+		  // BM25 over the user's personal notes (XDOX DBs only — legacy
+		  // xojo_rag.db has no notes tables; that case returns "" gracefully).
+		  If mDB = Nil Then Return ""
+
+		  Var safe As String = SanitizeFTSQuery(query)
+		  If safe = "" Then Return ""
+
+		  Var results() As String
+		  Try
+		    Var rs As RowSet = mDB.SelectSQL( _
+		      "SELECT n.title, n.body, n.tags, n.docs_version, n.version_warned " _
+		      + "FROM notes_fts JOIN notes n ON n.rowid = notes_fts.rowid " _
+		      + "WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) LIMIT ?", safe, maxResults)
+		    Do Until rs.AfterLastRow
+		      Var entry As String = "--- " + rs.Column("title").StringValue
+		      Var noteVersion As String = rs.Column("docs_version").StringValue
+		      If rs.Column("version_warned").IntegerValue = 1 And noteVersion <> "" Then
+		        entry = entry + " [possibly outdated — written for " + noteVersion + "]"
+		      End If
+		      entry = entry + " ---" + EndOfLine + rs.Column("body").StringValue
+		      Var tags As String = rs.Column("tags").StringValue
+		      If tags <> "" Then entry = entry + EndOfLine + "(tags: " + tags + ")"
+		      results.Add(entry)
+		      rs.MoveToNextRow
+		    Loop
+		    rs.Close
+		  Catch e As DatabaseException
+		    // notes tables absent (legacy DB) — not an error.
+		    Return ""
+		  End Try
+
+		  If results.Count = 0 Then Return ""
+		  Return "Found " + results.Count.ToString + " note(s) for """ + query + """:" _
+		    + EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function SanitizeFTSQuery(query As String) As String
+		  // FTS5 MATCH chokes on raw quotes/operators — strip them (same rules
+		  // as XDOX's Retrieval.SanitizeQuery).
+		  Var s As String = query
+		  Var specials() As String = Array("""", "'", "*", "^", "(", ")", "[", "]", "{", "}", "~", ":", "\", "/")
+		  For Each ch As String In specials
+		    s = s.ReplaceAll(ch, " ")
+		  Next
+		  While s.IndexOf("  ") >= 0
+		    s = s.ReplaceAll("  ", " ")
+		  Wend
+		  Return s.Trim
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -297,7 +433,10 @@ Protected Class SemanticSearch
 
 		  If results.Count = 0 Then Return ""
 
-		  Var output As String = "Found " + results.Count.ToString + " result(s) for """ + query + """ (semantic):" + _
+		  Var header As String = "Found " + results.Count.ToString + " result(s) for """ + query + """ (semantic"
+		  If mDocsVersion <> "" Then header = header + ", " + mDocsVersion
+		  header = header + "):"
+		  Var output As String = header + _
 		    EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
 
 		  // Store in cache (#13)
@@ -328,7 +467,7 @@ Protected Class SemanticSearch
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function FetchEmbedding(text As String) As MemoryBlock
+		Private Function FetchEmbedding(text As String, timeoutMs As Integer = 10000) As MemoryBlock
 		  Var escapedText As String = EscapeJSON(text)
 		  Var body As String = "{""model"":""nomic-embed-text.gguf"",""input"":""" + escapedText + """}"
 
@@ -338,6 +477,7 @@ Protected Class SemanticSearch
 
 		  Var http As New URLConnection
 		  AddHandler http.ContentReceived, AddressOf HttpContentReceived
+		  AddHandler http.Error, AddressOf HttpError
 		  http.RequestHeader("Content-Type") = "application/json"
 		  http.SetRequestContent(body, "application/json")
 
@@ -348,7 +488,7 @@ Protected Class SemanticSearch
 		  End Try
 
 		  Var timeout As Integer = 0
-		  While Not mHttpDone And timeout < 10000
+		  While Not mHttpDone And timeout < timeoutMs
 		    App.DoEvents(10)
 		    timeout = timeout + 10
 		  Wend
@@ -358,6 +498,17 @@ Protected Class SemanticSearch
 		  Return ParseEmbeddingJSON(mHttpBody)
 
 		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub HttpError(sender As URLConnection, err As RuntimeException)
+		  #Pragma Unused sender
+		  #Pragma Unused err
+		  // Connection refused (server down) — fail fast instead of waiting out
+		  // the full poll window.
+		  mHttpStatus = 0
+		  mHttpDone = True
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
@@ -449,6 +600,18 @@ Protected Class SemanticSearch
 
 	#tag Property, Flags = &h21
 		Private mDbPath As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mDocsVersion As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mEmbeddingDim As Integer
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mHasDatabase As Boolean
 	#tag EndProperty
 
 	// Persistent connection held open for the process lifetime (#12).

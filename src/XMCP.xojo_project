@@ -30,6 +30,7 @@ Class=CreateProjectItem;Tools/CreateProjectItem.xojo_code;&hFFFFFFFFAAAA0CFF;&hF
 Class=RunIDEScript;Tools/RunIDEScript.xojo_code;&hFFFFFFFFAAAA0DFF;&hFFFFFFFFAAAA01FF;false
 Class=GetProjectInfo;Tools/GetProjectInfo.xojo_code;&hFFFFFFFFAAAA0EFF;&hFFFFFFFFAAAA01FF;false
 Class=SearchDocs;Tools/SearchDocs.xojo_code;&hFFFFFFFFAAAA0FFF;&hFFFFFFFFAAAA01FF;false
+Class=SearchNotes;Tools/SearchNotes.xojo_code;&hFFFFFFFFAAAA1BFF;&hFFFFFFFFAAAA01FF;false
 Class=LookupClass;Tools/LookupClass.xojo_code;&hFFFFFFFFAAAA10FF;&hFFFFFFFFAAAA01FF;false
 Class=ListDocTopics;Tools/ListDocTopics.xojo_code;&hFFFFFFFFAAAA11FF;&hFFFFFFFFAAAA01FF;false
 Class=RevertProject;Tools/RevertProject.xojo_code;&hFFFFFFFFAAAA12FF;&hFFFFFFFFAAAA01FF;false
