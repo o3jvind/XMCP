@@ -2,6 +2,20 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.7.0] - 2026-07-06
+
+### Added
+- **`search_notes`**: searches the user's personal Xojo notes, written and curated in the [XDOX](https://github.com/o3jvind/XDOX) app. Notes flagged `[possibly outdated — written for Xojo <version>]` predate the currently indexed docs version. Responds gracefully against legacy databases without notes tables.
+- **`--db-path` option**: explicit RAG-database override. Default discovery order is now `--db-path` → `~/Library/Application Support/dk.o3jvind.xdox/xdox.db` (built and maintained by the XDOX app, which replaces XMCP-RAG-Indexer) → legacy `xojo_rag.db` next to the documentation.
+- **Keyword (BM25) search tier**: `search_docs` now degrades semantic → keyword → plain text scan. The keyword tier runs FTS5/BM25 against the RAG database and needs no embedding server, replacing the `llms-full.txt` substring scan as the primary fallback.
+- **Metadata validation**: `embedding_dim` ≠ 768 disables the semantic tier (keyword still works); the indexed `docs_version` is included in `search_docs`/`search_notes` result headers.
+
+### Changed
+- `SemanticSearch` keeps the database connection open when the embedding server is down (previously it discarded both), and the startup server probe fails fast (2 s + connection-error handler) instead of hanging up to 10 s.
+
+### Notes
+- The embedding server on port 8089 is managed automatically by the XDOX app while it runs. Semantic search is available whenever XDOX (or a manually started server) is up; keyword search works at all times.
+
 ## [1.6.0] - 2026-06-15
 
 ### Added
