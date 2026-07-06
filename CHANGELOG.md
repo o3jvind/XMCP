@@ -2,6 +2,15 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.7.1] - 2026-07-06
+
+### Added
+- **Hybrid `search_notes`**: notes are now scored semantically (0.7·cosine + 0.3·BM25, relevance floor 0.45 — same recipe as XDOX's chat) whenever the embedding server answers, so natural-language queries find notes that share no keywords with the question. Falls back to the keyword tier unchanged.
+
+### Fixed
+- **Startup-order dependency**: the RAG database and the embedding server were probed exactly once, at process start. XMCP typically starts with the editor — *before* XDOX — and would then sit in the lowest search tier until restarted. Both are now re-checked lazily at search time (server probes are rate-limited to one per 30 s while down), so search upgrades itself the moment XDOX comes up. The XDOX database path is used even when the file doesn't exist yet, covering first launch and post-schema-bump reindexes.
+- `search_docs` drops back to the keyword tier immediately when the embedding server disappears mid-session (previously each search paid a failed HTTP round-trip).
+
 ## [1.7.0] - 2026-07-06
 
 ### Added

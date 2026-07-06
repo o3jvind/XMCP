@@ -4,15 +4,28 @@ Protected Class SemanticSearch
 		Sub Constructor(embeddingUrl As String, dbPath As String)
 		  // Task 13: the DB connection and the embedding server are independent
 		  // tiers. A reachable DB alone enables keyword (BM25) search; the
-		  // embedding server upgrades it to hybrid semantic search. The DB is
-		  // therefore kept open even when the server is down.
+		  // embedding server upgrades it to hybrid semantic search. Both are
+		  // (re-)checked lazily at search time — XMCP typically starts with the
+		  // editor, i.e. BEFORE XDOX, so neither may exist yet at this point.
 		  mEmbeddingUrl = embeddingUrl
 		  mDbPath = dbPath
 		  mAvailable = False
 		  mHasDatabase = False
 
-		  Var dbFile As New FolderItem(dbPath, FolderItem.PathModes.Native)
-		  If dbFile = Nil Or Not dbFile.Exists Then Return
+		  Call EnsureDatabase
+		  EnsureAvailable
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function EnsureDatabase() As Boolean
+		  // Lazy DB attach: cheap flag check once connected; a missing file is
+		  // re-stat'ed on every call so a DB created after startup (first XDOX
+		  // launch, reindex after schema bump) is picked up automatically.
+		  If mHasDatabase Then Return True
+
+		  Var dbFile As New FolderItem(mDbPath, FolderItem.PathModes.Native)
+		  If dbFile = Nil Or Not dbFile.Exists Then Return False
 
 		  mDB = New SQLiteDatabase
 		  mDB.DatabaseFile = dbFile
@@ -20,7 +33,7 @@ Protected Class SemanticSearch
 		    mDB.Connect
 		  Catch e As DatabaseException
 		    mDB = Nil
-		    Return
+		    Return False
 		  End Try
 
 		  // Performance pragmas: WAL mode for non-blocking reads, memory-mapped I/O,
@@ -36,28 +49,41 @@ Protected Class SemanticSearch
 
 		  mHasDatabase = True
 		  ReadMetadata
+		  Return True
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub EnsureAvailable()
+		  // Lazy server probe with a cooldown: a down embedding server costs one
+		  // 2 s probe per kProbeCooldownMicros window, not one per search.
+		  If mAvailable Then Return
+		  If Not EnsureDatabase Then Return
 
 		  // Validate embedding compatibility: the cosine path assumes 768-dim
 		  // nomic float32 BLOBs. A DB built with another model must not be
 		  // scored semantically — keyword search still works.
 		  If mEmbeddingDim > 0 And mEmbeddingDim <> 768 Then
-		    System.DebugLog("SemanticSearch: DB uses " + mEmbeddingDim.ToString + "-dim embeddings (expected 768) — semantic tier disabled.")
+		    If Not mDimWarned Then
+		      mDimWarned = True
+		      System.DebugLog("SemanticSearch: DB uses " + mEmbeddingDim.ToString + "-dim embeddings (expected 768) — semantic tier disabled.")
+		    End If
 		    Return
 		  End If
 
-		  // Probe the embedding server with a short timeout so a down server
-		  // degrades to keyword search instantly instead of hanging.
+		  If mLastProbeMicros > 0 And Microseconds - mLastProbeMicros < kProbeCooldownMicros Then Return
+		  mLastProbeMicros = Microseconds
+
 		  Var testEmb As MemoryBlock = FetchEmbedding("test", 2000)
 		  If testEmb = Nil Then Return
 
 		  mAvailable = True
-
 		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
 		Function HasDatabase() As Boolean
-		  Return mHasDatabase
+		  Return EnsureDatabase
 		End Function
 	#tag EndMethod
 
@@ -93,7 +119,7 @@ Protected Class SemanticSearch
 		Function KeywordSearch(query As String, maxResults As Integer) As String
 		  // BM25-only tier: works with just the DB file, no embedding server.
 		  // Replaces the old llms-full.txt substring scan as the primary fallback.
-		  If mDB = Nil Then Return ""
+		  If Not EnsureDatabase Then Return ""
 
 		  Var safe As String = SanitizeFTSQuery(query)
 		  If safe = "" Then Return ""
@@ -123,10 +149,131 @@ Protected Class SemanticSearch
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Function SearchNotes(query As String, maxResults As Integer) As String
+		  // Tiered notes search: hybrid (cosine + BM25) when the embedding server
+		  // answers, keyword-only otherwise. Mirrors XDOX's Retrieval.SearchNotes
+		  // so natural-language queries find notes that share no keywords.
+		  EnsureAvailable
+		  If mAvailable Then
+		    Var hybrid As String = SearchNotesHybrid(query, maxResults)
+		    If hybrid <> "" Then Return hybrid
+		  End If
+		  Return SearchNotesKeyword(query, maxResults)
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function SearchNotesHybrid(query As String, maxResults As Integer) As String
+		  // Ported from XDOX Retrieval.HybridSearchNotes: 0.7·cosine + 0.3·BM25,
+		  // relevance floor 0.45 so unrelated notes stay out of results.
+		  If mDB = Nil Then Return ""
+
+		  Var queryEmb As MemoryBlock = FetchEmbedding(query)
+		  If queryEmb = Nil Then
+		    mAvailable = False
+		    mLastProbeMicros = Microseconds
+		    Return ""
+		  End If
+
+		  Var rowids() As Integer
+		  Var titles() As String
+		  Var bodies() As String
+		  Var tagsArr() As String
+		  Var versions() As String
+		  Var warned() As Boolean
+		  Var cosScores() As Double
+
+		  Try
+		    Var rs As RowSet = mDB.SelectSQL( _
+		      "SELECT n.rowid AS rid, n.title, n.body, n.tags, n.docs_version, n.version_warned, e.embedding " _
+		      + "FROM note_embeddings e JOIN notes n ON e.note_id = n.id")
+		    Do Until rs.AfterLastRow
+		      Var embBlob As MemoryBlock = rs.Column("embedding").BlobValue
+		      If embBlob <> Nil And embBlob.Size > 0 Then
+		        rowids.Add(rs.Column("rid").IntegerValue)
+		        titles.Add(rs.Column("title").StringValue)
+		        bodies.Add(rs.Column("body").StringValue)
+		        tagsArr.Add(rs.Column("tags").StringValue)
+		        versions.Add(rs.Column("docs_version").StringValue)
+		        warned.Add(rs.Column("version_warned").IntegerValue = 1)
+		        cosScores.Add(CosineSimilarity(queryEmb, embBlob))
+		      End If
+		      rs.MoveToNextRow
+		    Loop
+		    rs.Close
+		  Catch e As DatabaseException
+		    // note_embeddings absent (legacy DB) — keyword tier handles it.
+		    Return ""
+		  End Try
+		  If rowids.Count = 0 Then Return ""
+
+		  // BM25 leg over notes_fts (rowid-keyed), normalised like the docs path.
+		  Var ftsScores() As Double
+		  For i As Integer = 0 To rowids.LastIndex
+		    ftsScores.Add(0.0)
+		  Next i
+		  Var safe As String = SanitizeFTSQuery(query)
+		  If safe <> "" Then
+		    Try
+		      Var ftsMap As New Dictionary
+		      Var ftsRS As RowSet = mDB.SelectSQL( _
+		        "SELECT rowid, bm25(notes_fts) AS s FROM notes_fts WHERE notes_fts MATCH ? LIMIT 100", safe)
+		      Do Until ftsRS.AfterLastRow
+		        ftsMap.Value(ftsRS.Column("rowid").IntegerValue) = 1.0 / (1.0 + Exp(ftsRS.Column("s").DoubleValue * 0.5))
+		        ftsRS.MoveToNextRow
+		      Loop
+		      ftsRS.Close
+		      For i As Integer = 0 To rowids.LastIndex
+		        If ftsMap.HasKey(rowids(i)) Then ftsScores(i) = CDbl(ftsMap.Value(rowids(i)))
+		      Next i
+		    Catch e As DatabaseException
+		      // FTS unavailable — cosine-only.
+		    End Try
+		  End If
+
+		  Var combined() As Double
+		  For i As Integer = 0 To cosScores.LastIndex
+		    combined.Add(cosScores(i) * 0.7 + ftsScores(i) * 0.3)
+		  Next i
+
+		  Var used() As Boolean
+		  For i As Integer = 0 To combined.LastIndex
+		    used.Add(False)
+		  Next i
+
+		  Var results() As String
+		  For r As Integer = 1 To maxResults
+		    Var bestIdx As Integer = -1
+		    Var bestScore As Double = kNoteRelevanceFloor
+		    For i As Integer = 0 To combined.LastIndex
+		      If Not used(i) And combined(i) > bestScore Then
+		        bestScore = combined(i)
+		        bestIdx = i
+		      End If
+		    Next i
+		    If bestIdx < 0 Then Exit
+		    used(bestIdx) = True
+
+		    Var entry As String = "--- " + titles(bestIdx)
+		    If warned(bestIdx) And versions(bestIdx) <> "" Then
+		      entry = entry + " [possibly outdated — written for " + versions(bestIdx) + "]"
+		    End If
+		    entry = entry + " ---" + EndOfLine + bodies(bestIdx)
+		    If tagsArr(bestIdx) <> "" Then entry = entry + EndOfLine + "(tags: " + tagsArr(bestIdx) + ")"
+		    results.Add(entry)
+		  Next r
+
+		  If results.Count = 0 Then Return ""
+		  Return "Found " + results.Count.ToString + " note(s) for """ + query + """ (semantic):" _
+		    + EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Function SearchNotesKeyword(query As String, maxResults As Integer) As String
 		  // BM25 over the user's personal notes (XDOX DBs only — legacy
 		  // xojo_rag.db has no notes tables; that case returns "" gracefully).
-		  If mDB = Nil Then Return ""
+		  If Not EnsureDatabase Then Return ""
 
 		  Var safe As String = SanitizeFTSQuery(query)
 		  If safe = "" Then Return ""
@@ -188,8 +335,8 @@ Protected Class SemanticSearch
 
 	#tag Method, Flags = &h0
 		Function Available() As Boolean
+		  EnsureAvailable
 		  Return mAvailable
-
 		End Function
 	#tag EndMethod
 
@@ -205,7 +352,13 @@ Protected Class SemanticSearch
 		  End If
 
 		  Var queryEmb As MemoryBlock = FetchEmbedding(query)
-		  If queryEmb = Nil Then Return ""
+		  If queryEmb = Nil Then
+		    // Server died since the last probe — drop to keyword tier and let the
+		    // cooldown re-probe pick it back up when it returns.
+		    mAvailable = False
+		    mLastProbeMicros = Microseconds
+		    Return ""
+		  End If
 
 		  // --- Vector search: score all embedded chunks (#12 persistent connection) ---
 		  Var rs As RowSet
@@ -636,12 +789,29 @@ Protected Class SemanticSearch
 		Private mHttpStatus As Integer
 	#tag EndProperty
 
+	// Microseconds timestamp of the last (failed) embedding-server probe.
+	#tag Property, Flags = &h21
+		Private mLastProbeMicros As Double
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mDimWarned As Boolean
+	#tag EndProperty
+
 	// Maximum number of cached query results before the cache is cleared.
 	#tag Constant, Name = kCacheMaxEntries, Type = Integer, Dynamic = False, Default = \"50", Scope = Private
 	#tag EndConstant
 
 	// Cosine score threshold above which neighbour chunks are fetched (#6).
 	#tag Constant, Name = kNeighbourThreshold, Type = Double, Dynamic = False, Default = \"0.72", Scope = Private
+	#tag EndConstant
+
+	// Minimum combined score for a note to be returned (matches XDOX).
+	#tag Constant, Name = kNoteRelevanceFloor, Type = Double, Dynamic = False, Default = \"0.45", Scope = Private
+	#tag EndConstant
+
+	// Re-probe a down embedding server at most this often (30 s).
+	#tag Constant, Name = kProbeCooldownMicros, Type = Double, Dynamic = False, Default = \"30000000", Scope = Private
 	#tag EndConstant
 
 

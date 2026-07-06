@@ -51,31 +51,35 @@ Inherits MCPKit.ServerApplication
 		      ragDB = Nil
 		    End If
 		  End If
-		  If ragDB = Nil Then
-		    Var xdoxDB As FolderItem = SpecialFolder.ApplicationData.Child("dk.o3jvind.xdox").Child("xdox.db")
-		    If xdoxDB <> Nil And xdoxDB.Exists Then ragDB = xdoxDB
-		  End If
+		  Var xdoxDB As FolderItem = SpecialFolder.ApplicationData.Child("dk.o3jvind.xdox").Child("xdox.db")
+		  If ragDB = Nil And xdoxDB <> Nil And xdoxDB.Exists Then ragDB = xdoxDB
 		  If ragDB = Nil And DocsPath <> Nil Then
 		    Var legacyDB As FolderItem = DocsPath.Child("xojo_rag.db")
 		    If legacyDB <> Nil And legacyDB.Exists Then ragDB = legacyDB
 		  End If
+		  If ragDB = Nil Then
+		    // XDOX's canonical path — used even when the file doesn't exist yet:
+		    // SemanticSearch re-probes lazily, so a DB created after we start
+		    // (first XDOX launch, reindex after schema bump) is picked up without
+		    // restarting the MCP server.
+		    ragDB = xdoxDB
+		  End If
 
 		  // The DB alone enables keyword (BM25) search; a running embedding server
 		  // (XDOX manages one on port 8089) upgrades it to hybrid semantic search.
-		  If ragDB <> Nil Then
-		    SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", ragDB.NativePath)
-		    If Not SemanticSearch.HasDatabase Then
-		      SemanticSearch = Nil
-		    ElseIf Verbose Then
+		  // Both are re-checked at search time — startup order no longer matters.
+		  SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", ragDB.NativePath)
+		  If Verbose Then
+		    If SemanticSearch.HasDatabase Then
 		      System.DebugLog("RAG database: " + ragDB.NativePath)
 		      If SemanticSearch.Available Then
 		        System.DebugLog("Semantic search enabled (hybrid).")
 		      Else
 		        System.DebugLog("Embedding server not reachable — keyword (BM25) search only.")
 		      End If
+		    Else
+		      System.DebugLog("No RAG database yet at " + ragDB.NativePath + " — will re-check at search time; falling back to plain text scan meanwhile.")
 		    End If
-		  ElseIf Verbose Then
-		    System.DebugLog("No RAG database found — search_docs falls back to plain text scan.")
 		  End If
 
 		  // Register all MCP tools.

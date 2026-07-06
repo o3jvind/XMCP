@@ -36,7 +36,7 @@ Inherits MCPKit.Tool
 		    Return MCPKit.ToolResult.Success("No notes database found. Personal notes require the XDOX app (its database also powers this tool).")
 		  End If
 
-		  Var result As String = App.SemanticSearch.SearchNotesKeyword(query, maxResults)
+		  Var result As String = App.SemanticSearch.SearchNotes(query, maxResults)
 		  If result = "" Then
 		    Return MCPKit.ToolResult.Success("No notes found for: " + query)
 		  End If
