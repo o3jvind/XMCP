@@ -44,6 +44,15 @@ XMCP also ships a `usage-guide.md` file next to the binary, exposed as an MCP re
 }
 ```
 
+**OpenAI Codex CLI** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.xmcp]
+command = "/path/to/XMCP"
+```
+
+Any other MCP-capable client works the same way — XMCP speaks standard MCP over stdin/stdout, so point the client at the binary as its server command.
+
 To specify a custom documentation path:
 
 ```json
@@ -69,7 +78,7 @@ XMCP [options]
 | `-v`, `--verbose` | Enable verbose debug logging to stderr |
 | `-d`, `--docs-path PATH` | Path to Xojo documentation directory (auto-detected if omitted) |
 
-The server communicates via JSON-RPC over stdin/stdout following the MCP protocol. It is not meant to be run interactively - it is launched by an MCP client (like Claude Code or Claude Desktop).
+The server communicates via JSON-RPC over stdin/stdout following the MCP protocol. It is not meant to be run interactively - it is launched by an MCP client (like Claude Code, Codex CLI, or Claude Desktop).
 
 You can start XMCP before the Xojo IDE. IDE-dependent tools will return an error until the IDE socket is available.
 XMCP retries both standard socket paths on each IDE request, so tools begin working automatically once the IDE starts.
