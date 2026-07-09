@@ -112,7 +112,59 @@ Protected Class SemanticSearch
 		  Catch e As DatabaseException
 		    // No metadata table — legacy DB, carry on.
 		  End Try
+
+		  // Multi-version support (XDOX schema v3): chunks carry a docs_version and
+		  // notes carry a scope. Older/legacy DBs (xojo_rag.db, schema < 3) lack
+		  // these columns, so probe once and gate the version/scope filters on their
+		  // presence — otherwise the added WHERE clauses would throw and silently
+		  // return no results against an older database.
+		  mHasChunkVersion = ColumnExists("chunks", "docs_version")
+		  mHasNoteScope = ColumnExists("notes", "scope")
 		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function ColumnExists(tableName As String, columnName As String) As Boolean
+		  // PRAGMA table_info can't take a bound parameter for the table name in all
+		  // SQLite builds, so the name is inlined. tableName is a compile-time
+		  // constant here ("chunks"/"notes"), never user input — no injection risk.
+		  If mDB = Nil Then Return False
+		  Try
+		    Var rs As RowSet = mDB.SelectSQL("PRAGMA table_info(" + tableName + ")")
+		    Var found As Boolean = False
+		    Do Until rs.AfterLastRow
+		      If rs.Column("name").StringValue = columnName Then
+		        found = True
+		        Exit
+		      End If
+		      rs.MoveToNextRow
+		    Loop
+		    rs.Close
+		    Return found
+		  Catch e As DatabaseException
+		    Return False
+		  End Try
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function ActiveDocsVersion() As String
+		  // The Xojo version chat/retrieval currently filters on, read fresh on each
+		  // search so XMCP tracks XDOX's live version switch (XDOX may change it
+		  // while we hold this connection). Falls back to the last-indexed
+		  // docs_version, then "" — an empty value means "no filter" (match all).
+		  If mDB = Nil Then Return mDocsVersion
+		  Try
+		    Var rs As RowSet = mDB.SelectSQL("SELECT value FROM metadata WHERE key = 'active_docs_version'")
+		    Var v As String = ""
+		    If Not rs.AfterLastRow Then v = rs.Column("value").StringValue
+		    rs.Close
+		    If v <> "" Then Return v
+		  Catch e As DatabaseException
+		    // No metadata table — fall through to the indexed version.
+		  End Try
+		  Return mDocsVersion
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
@@ -124,12 +176,24 @@ Protected Class SemanticSearch
 		  Var safe As String = SanitizeFTSQuery(query)
 		  If safe = "" Then Return ""
 
+		  // Multi-version: restrict to the active version plus version-independent
+		  // chunks (docs_version=''). Skipped on legacy DBs without the column.
+		  // Keep this filter in sync with XDOX Retrieval.KeywordSearchChunks.
+		  Var activeVersion As String = ActiveDocsVersion
+		  Var versionClause As String = ""
+		  If mHasChunkVersion Then versionClause = "AND (c.docs_version = ? OR c.docs_version = '') "
+
 		  Var results() As String
 		  Try
-		    Var rs As RowSet = mDB.SelectSQL( _
-		      "SELECT c.title, c.chunk_text, c.prev_id, c.next_id, bm25(chunks_fts) AS score " _
+		    Var sql As String = "SELECT c.title, c.chunk_text, c.prev_id, c.next_id, bm25(chunks_fts) AS score " _
 		      + "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid " _
-		      + "WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?", safe, maxResults)
+		      + "WHERE chunks_fts MATCH ? " + versionClause + "ORDER BY score LIMIT ?"
+		    Var rs As RowSet
+		    If mHasChunkVersion Then
+		      rs = mDB.SelectSQL(sql, safe, activeVersion, maxResults)
+		    Else
+		      rs = mDB.SelectSQL(sql, safe, maxResults)
+		    End If
 		    Do Until rs.AfterLastRow
 		      results.Add("--- " + rs.Column("title").StringValue + " ---" + EndOfLine + rs.Column("chunk_text").StringValue)
 		      rs.MoveToNextRow
@@ -142,7 +206,8 @@ Protected Class SemanticSearch
 		  If results.Count = 0 Then Return ""
 
 		  Var header As String = "Found " + results.Count.ToString + " result(s) for """ + query + """ (keyword"
-		  If mDocsVersion <> "" Then header = header + ", " + mDocsVersion
+		  Var headerVersion As String = If(activeVersion <> "", activeVersion, mDocsVersion)
+		  If headerVersion <> "" Then header = header + ", " + headerVersion
 		  header = header + "):"
 		  Return header + EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
 		End Function
@@ -180,12 +245,18 @@ Protected Class SemanticSearch
 		  Var bodies() As String
 		  Var tagsArr() As String
 		  Var versions() As String
+		  Var scopes() As String
 		  Var warned() As Boolean
 		  Var cosScores() As Double
 
+		  // All notes stay searchable regardless of scope; the scope column only
+		  // governs the outdated label (global notes never carry it). Selected
+		  // conditionally so legacy DBs without the column still work.
+		  Var scopeCol As String = If(mHasNoteScope, "n.scope", "'' AS scope")
+
 		  Try
 		    Var rs As RowSet = mDB.SelectSQL( _
-		      "SELECT n.rowid AS rid, n.title, n.body, n.tags, n.docs_version, n.version_warned, e.embedding " _
+		      "SELECT n.rowid AS rid, n.title, n.body, n.tags, n.docs_version, n.version_warned, " + scopeCol + ", e.embedding " _
 		      + "FROM note_embeddings e JOIN notes n ON e.note_id = n.id")
 		    Do Until rs.AfterLastRow
 		      Var embBlob As MemoryBlock = rs.Column("embedding").BlobValue
@@ -195,6 +266,7 @@ Protected Class SemanticSearch
 		        bodies.Add(rs.Column("body").StringValue)
 		        tagsArr.Add(rs.Column("tags").StringValue)
 		        versions.Add(rs.Column("docs_version").StringValue)
+		        scopes.Add(rs.Column("scope").StringValue)
 		        warned.Add(rs.Column("version_warned").IntegerValue = 1)
 		        cosScores.Add(CosineSimilarity(queryEmb, embBlob))
 		      End If
@@ -255,7 +327,11 @@ Protected Class SemanticSearch
 		    used(bestIdx) = True
 
 		    Var entry As String = "--- " + titles(bestIdx)
-		    If warned(bestIdx) And versions(bestIdx) <> "" Then
+		    // Global notes (scope='all') are version-independent and never labelled;
+		    // only version-scoped notes carry the outdated caveat. On legacy DBs
+		    // without the scope column, keep the old warned-only behaviour.
+		    Var scopedVersion As Boolean = If(mHasNoteScope, scopes(bestIdx) = "version", True)
+		    If scopedVersion And warned(bestIdx) And versions(bestIdx) <> "" Then
 		      entry = entry + " [possibly outdated — written for " + versions(bestIdx) + "]"
 		    End If
 		    entry = entry + " ---" + EndOfLine + bodies(bestIdx)
@@ -278,16 +354,22 @@ Protected Class SemanticSearch
 		  Var safe As String = SanitizeFTSQuery(query)
 		  If safe = "" Then Return ""
 
+		  // All notes searchable regardless of scope; scope only governs the
+		  // outdated label. Column selected conditionally for legacy-DB safety.
+		  Var scopeCol As String = If(mHasNoteScope, "n.scope", "'' AS scope")
+
 		  Var results() As String
 		  Try
 		    Var rs As RowSet = mDB.SelectSQL( _
-		      "SELECT n.title, n.body, n.tags, n.docs_version, n.version_warned " _
+		      "SELECT n.title, n.body, n.tags, n.docs_version, n.version_warned, " + scopeCol + " " _
 		      + "FROM notes_fts JOIN notes n ON n.rowid = notes_fts.rowid " _
 		      + "WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) LIMIT ?", safe, maxResults)
 		    Do Until rs.AfterLastRow
 		      Var entry As String = "--- " + rs.Column("title").StringValue
 		      Var noteVersion As String = rs.Column("docs_version").StringValue
-		      If rs.Column("version_warned").IntegerValue = 1 And noteVersion <> "" Then
+		      // Global notes never carry the caveat; legacy DBs keep warned-only.
+		      Var scopedVersion As Boolean = If(mHasNoteScope, rs.Column("scope").StringValue = "version", True)
+		      If scopedVersion And rs.Column("version_warned").IntegerValue = 1 And noteVersion <> "" Then
 		        entry = entry + " [possibly outdated — written for " + noteVersion + "]"
 		      End If
 		      entry = entry + " ---" + EndOfLine + rs.Column("body").StringValue
@@ -345,8 +427,12 @@ Protected Class SemanticSearch
 		  If Not mAvailable Then Return ""
 		  If mDB = Nil Then Return ""
 
+		  // Read fresh so a live version switch in XDOX takes effect immediately —
+		  // and so the cache never serves another version's results.
+		  Var activeVersion As String = ActiveDocsVersion
+
 		  // --- Cache check (#13) ---
-		  Var cacheKey As String = query + "|" + maxResults.ToString
+		  Var cacheKey As String = activeVersion + "|" + query + "|" + maxResults.ToString
 		  If mCache <> Nil And mCache.HasKey(cacheKey) Then
 		    Return mCache.Value(cacheKey)
 		  End If
@@ -361,9 +447,16 @@ Protected Class SemanticSearch
 		  End If
 
 		  // --- Vector search: score all embedded chunks (#12 persistent connection) ---
+		  // Multi-version: restrict to the active version plus version-independent
+		  // chunks (docs_version=''); skipped on legacy DBs without the column. Keep
+		  // in sync with XDOX Retrieval.HybridSearchChunks. (activeVersion read above.)
 		  Var rs As RowSet
 		  Try
-		    rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id")
+		    If mHasChunkVersion Then
+		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ? OR c.docs_version = ''", activeVersion)
+		    Else
+		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id")
+		    End If
 		  Catch e As DatabaseException
 		    Return ""
 		  End Try
@@ -587,7 +680,8 @@ Protected Class SemanticSearch
 		  If results.Count = 0 Then Return ""
 
 		  Var header As String = "Found " + results.Count.ToString + " result(s) for """ + query + """ (semantic"
-		  If mDocsVersion <> "" Then header = header + ", " + mDocsVersion
+		  Var headerVersion As String = If(activeVersion <> "", activeVersion, mDocsVersion)
+		  If headerVersion <> "" Then header = header + ", " + headerVersion
 		  header = header + "):"
 		  Var output As String = header + _
 		    EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
@@ -757,6 +851,18 @@ Protected Class SemanticSearch
 
 	#tag Property, Flags = &h21
 		Private mDocsVersion As String
+	#tag EndProperty
+
+	// True when chunks.docs_version exists (XDOX schema v3+); gates the docs
+	// version filter so legacy DBs without the column still search.
+	#tag Property, Flags = &h21
+		Private mHasChunkVersion As Boolean
+	#tag EndProperty
+
+	// True when notes.scope exists (XDOX schema v3+); gates the scope-aware
+	// outdated-label logic in note search.
+	#tag Property, Flags = &h21
+		Private mHasNoteScope As Boolean
 	#tag EndProperty
 
 	#tag Property, Flags = &h21

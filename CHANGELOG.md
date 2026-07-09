@@ -2,6 +2,17 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.8.0] - 2026-07-09
+
+### Added
+- **Multiple Xojo versions**: XDOX (schema v3) can now index several Xojo doc versions side by side in one `xdox.db`, each chunk tagged with its `docs_version`. `search_docs` filters results to the version XDOX currently has active (`metadata.active_docs_version`, read fresh on every search so a live version switch in XDOX takes effect immediately) plus version-independent curated chunks (`docs_version = ''`). Result headers show the active version. This mirrors XDOX's `Retrieval` — the same filter is deliberately duplicated on both sides.
+
+### Changed
+- **Note relevance labelling**: notes now carry a `scope` (`all` = global/version-independent, or `version`). Only version-scoped notes can show the `[possibly outdated — written for …]` caveat; global notes never do. `search_notes` still searches **all** notes regardless of scope — nothing is filtered out, so Claude never silently misses a note.
+
+### Compatibility
+- Legacy databases (`xojo_rag.db`, or XDOX schema < 3 without the `docs_version`/`scope` columns) are detected at attach and the new filters are skipped — search behaves exactly as before against them.
+
 ## [1.7.1] - 2026-07-06
 
 ### Added
