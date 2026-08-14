@@ -177,11 +177,13 @@ Protected Class SemanticSearch
 		  If safe = "" Then Return ""
 
 		  // Multi-version: restrict to the active version plus version-independent
-		  // chunks (docs_version=''). Skipped on legacy DBs without the column.
-		  // Keep this filter in sync with XDOX Retrieval.KeywordSearchChunks.
+		  // chunks (docs_version='') and MBS docset chunks (docs_version=kMBSDocsVersion,
+		  // always included regardless of active Xojo version). Skipped on legacy
+		  // DBs without the column. Keep this filter in sync with XDOX
+		  // Retrieval.KeywordSearchChunks.
 		  Var activeVersion As String = ActiveDocsVersion
 		  Var versionClause As String = ""
-		  If mHasChunkVersion Then versionClause = "AND (c.docs_version = ? OR c.docs_version = '') "
+		  If mHasChunkVersion Then versionClause = "AND (c.docs_version = ? OR c.docs_version = '' OR c.docs_version = ?) "
 
 		  Var results() As String
 		  Try
@@ -190,7 +192,7 @@ Protected Class SemanticSearch
 		      + "WHERE chunks_fts MATCH ? " + versionClause + "ORDER BY score LIMIT ?"
 		    Var rs As RowSet
 		    If mHasChunkVersion Then
-		      rs = mDB.SelectSQL(sql, safe, activeVersion, maxResults)
+		      rs = mDB.SelectSQL(sql, safe, activeVersion, kMBSDocsVersion, maxResults)
 		    Else
 		      rs = mDB.SelectSQL(sql, safe, maxResults)
 		    End If
@@ -406,6 +408,23 @@ Protected Class SemanticSearch
 		End Function
 	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Function ExtractClassName(title As String) As String
+		  // Ported from XDOX Retrieval.ExtractClassName — chunk titles are
+		  // near-universally "ClassName.member...". Whole-page/FAQ-style titles
+		  // with no "." return "" (nothing to boost against).
+		  Var dotPos As Integer = title.IndexOf(".")
+		  If dotPos < 4 Then Return ""
+		  Var candidate As String = title.Left(dotPos)
+		  For i As Integer = 0 To candidate.Length - 1
+		    Var ch As String = candidate.Middle(i, 1)
+		    Var isAlnum As Boolean = (ch >= "a" And ch <= "z") Or (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9")
+		    If Not isAlnum Then Return ""
+		  Next
+		  Return candidate
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h0
 		Sub Destructor()
 		  If mDB <> Nil Then
@@ -448,12 +467,13 @@ Protected Class SemanticSearch
 
 		  // --- Vector search: score all embedded chunks (#12 persistent connection) ---
 		  // Multi-version: restrict to the active version plus version-independent
-		  // chunks (docs_version=''); skipped on legacy DBs without the column. Keep
-		  // in sync with XDOX Retrieval.HybridSearchChunks. (activeVersion read above.)
+		  // chunks (docs_version='') and MBS docset chunks (docs_version=kMBSDocsVersion);
+		  // skipped on legacy DBs without the column. Keep in sync with XDOX
+		  // Retrieval.HybridSearchChunks. (activeVersion read above.)
 		  Var rs As RowSet
 		  Try
 		    If mHasChunkVersion Then
-		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ? OR c.docs_version = ''", activeVersion)
+		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ? OR c.docs_version = '' OR c.docs_version = ?", activeVersion, kMBSDocsVersion)
 		    Else
 		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id")
 		    End If
@@ -521,10 +541,21 @@ Protected Class SemanticSearch
 		    // FTS not available (old DB without chunks_fts) — vector-only mode.
 		  End Try
 
-		  // Combine: 70% vector + 30% FTS
+		  // Combine: 70% vector + 30% FTS, plus a flat boost when the query names
+		  // this chunk's class exactly. Ported from XDOX Retrieval.HybridSearchChunks
+		  // — cosine similarity alone can't reliably separate e.g.
+		  // "DesktopWKWebViewControlMBS" from "DesktopWebView2ControlMBS" (both
+		  // score ~0.75 against a query naming the former), so an explicit
+		  // substring match on a named class overrides a close cosine race.
+		  Var queryLowerForBoost As String = query.Lowercase
 		  Var combinedScores() As Double
 		  For i As Integer = 0 To scores.LastIndex
-		    combinedScores.Add(scores(i) * 0.7 + ftsScores(i) * 0.3)
+		    Var score As Double = scores(i) * 0.7 + ftsScores(i) * 0.3
+		    Var className As String = ExtractClassName(titles(i))
+		    If className <> "" And queryLowerForBoost.IndexOf(className.Lowercase) >= 0 Then
+		      score = score + kClassNameBoost
+		    End If
+		    combinedScores.Add(score)
 		  Next i
 
 		  // --- Partial selection sort for top maxResults*2 candidates (to allow dedup) ---
@@ -916,8 +947,17 @@ Protected Class SemanticSearch
 	#tag Constant, Name = kNoteRelevanceFloor, Type = Double, Dynamic = False, Default = \"0.45", Scope = Private
 	#tag EndConstant
 
+	// Flat score boost when the query names a chunk's class exactly (matches XDOX).
+	#tag Constant, Name = kClassNameBoost, Type = Double, Dynamic = False, Default = \"0.15", Scope = Private
+	#tag EndConstant
+
 	// Re-probe a down embedding server at most this often (30 s).
 	#tag Constant, Name = kProbeCooldownMicros, Type = Double, Dynamic = False, Default = \"30000000", Scope = Private
+	#tag EndConstant
+
+	// docs_version sentinel for MBS docset chunks — always included in results
+	// regardless of active Xojo version. Must match XDOX's DBHelper.kMBSDocsVersion.
+	#tag Constant, Name = kMBSDocsVersion, Type = String, Dynamic = False, Default = \"mbs", Scope = Private
 	#tag EndConstant
 
 

@@ -2,6 +2,23 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.8.1] - 2026-08-14
+
+### Fixed
+- **Retrieval scoring kept in sync with XDOX's MBS docset support**: XDOX now
+  indexes the MBS Xojo Plugins documentation under its own `docs_version`
+  sentinel (`"mbs"`) instead of the version-independent `''`, so `SemanticSearch`'s
+  version filters (`KeywordSearch`, hybrid vector search) are updated to include
+  `docs_version = "mbs"` alongside the active Xojo version — without this, MBS
+  chunks would have silently dropped out of `search_docs`/`lookup_class` results
+  once XDOX's own filter changed. Also ported XDOX's class-name-exact-match score
+  boost (`ExtractClassName`): cosine similarity alone doesn't reliably separate
+  similarly-named MBS classes (e.g. `DesktopWKWebViewControlMBS` vs
+  `DesktopWebView2ControlMBS`) within the handful of results actually returned,
+  so a query naming a class exactly now gets a flat boost toward that class's
+  chunks. Both changes mirror XDOX's `Retrieval.xojo_code` — the scoring recipe
+  is deliberately duplicated on both sides.
+
 ## [1.8.0] - 2026-07-09
 
 ### Added
