@@ -173,7 +173,7 @@ Protected Class SemanticSearch
 		  // Replaces the old llms-full.txt substring scan as the primary fallback.
 		  If Not EnsureDatabase Then Return ""
 
-		  Var safe As String = SanitizeFTSQuery(query)
+		  Var safe As String = BuildMatchQuery(query)
 		  If safe = "" Then Return ""
 
 		  // Multi-version: restrict to the active version plus version-independent
@@ -286,7 +286,7 @@ Protected Class SemanticSearch
 		  For i As Integer = 0 To rowids.LastIndex
 		    ftsScores.Add(0.0)
 		  Next i
-		  Var safe As String = SanitizeFTSQuery(query)
+		  Var safe As String = BuildMatchQuery(query)
 		  If safe <> "" Then
 		    Try
 		      Var ftsMap As New Dictionary
@@ -353,7 +353,7 @@ Protected Class SemanticSearch
 		  // xojo_rag.db has no notes tables; that case returns "" gracefully).
 		  If Not EnsureDatabase Then Return ""
 
-		  Var safe As String = SanitizeFTSQuery(query)
+		  Var safe As String = BuildMatchQuery(query)
 		  If safe = "" Then Return ""
 
 		  // All notes searchable regardless of scope; scope only governs the
@@ -397,7 +397,7 @@ Protected Class SemanticSearch
 		  // FTS5 MATCH chokes on raw quotes/operators — strip them (same rules
 		  // as XDOX's Retrieval.SanitizeQuery).
 		  Var s As String = query
-		  Var specials() As String = Array("""", "'", "*", "^", "(", ")", "[", "]", "{", "}", "~", ":", "\", "/")
+		  Var specials() As String = Array("""", "'", "*", "^", "(", ")", "[", "]", "{", "}", "~", ":", "\", "/", "-", "?", "!", ".", ",", ";")
 		  For Each ch As String In specials
 		    s = s.ReplaceAll(ch, " ")
 		  Next
@@ -409,18 +409,61 @@ Protected Class SemanticSearch
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Function ExtractClassName(title As String) As String
-		  // Ported from XDOX Retrieval.ExtractClassName — chunk titles are
-		  // near-universally "ClassName.member...". Whole-page/FAQ-style titles
-		  // with no "." return "" (nothing to boost against).
+		Private Function BuildMatchQuery(query As String) As String
+		  // FTS5's default MATCH is an implicit AND across all tokens, so a
+		  // conversational query almost never matches terse reference text and
+		  // returns zero rows. OR-joining lets any token match. Keep in sync
+		  // with XDOX Retrieval.BuildMatchQuery.
+		  Var safe As String = SanitizeFTSQuery(query)
+		  If safe = "" Then Return ""
+		  Return String.FromArray(safe.Split(" "), " OR ")
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function ExtractClassName(title As String, chunkText As String) As String
+		  // Ported from XDOX Retrieval.ExtractClassName. Two title conventions
+		  // coexist: MBS docset titles are "ClassName.member..." (dot) — safe to
+		  // trust from the title alone. Native Xojo-doc titles use
+		  // "ClassName > member..." (arrow) instead, but the same arrow shape is
+		  // also used by IDE-guide/tutorial sections that aren't classes at all
+		  // ("Toolbar > Common members" is the Xojo IDE's own toolbar, unrelated
+		  // to the DesktopToolbar control). Trusting the arrow form from the
+		  // title alone re-creates the bug this boost exists to prevent — a
+		  // generic page out-ranking the real API chunk. An arrow-form candidate
+		  // is only accepted when corroborated by the chunk text: either this
+		  // chunk IS the class's canonical overview page ("ClassName > Overview"
+		  // titles have prose bodies, checked by title suffix), or the chunk is
+		  // a real member page whose body's second line repeats
+		  // "ClassName.MemberName" (e.g. "DesktopHTMLViewer > Loadurl" is
+		  // followed by "DesktopHTMLViewer.LoadURL") — guide/tutorial chunks
+		  // never do this. Keep in sync with XDOX Retrieval.ExtractClassName.
 		  Var dotPos As Integer = title.IndexOf(".")
-		  If dotPos < 4 Then Return ""
-		  Var candidate As String = title.Left(dotPos)
+		  Var arrowPos As Integer = title.IndexOf(" > ")
+		  Var sepPos As Integer = dotPos
+		  Var isArrow As Boolean = False
+		  If arrowPos >= 0 And (dotPos < 0 Or arrowPos < dotPos) Then
+		    sepPos = arrowPos
+		    isArrow = True
+		  End If
+		  If sepPos < 4 Then Return ""
+		  Var candidate As String = title.Left(sepPos)
 		  For i As Integer = 0 To candidate.Length - 1
 		    Var ch As String = candidate.Middle(i, 1)
 		    Var isAlnum As Boolean = (ch >= "a" And ch <= "z") Or (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9")
 		    If Not isAlnum Then Return ""
 		  Next
+
+		  If isArrow Then
+		    Var isOverviewTitle As Boolean = title = candidate + " > Overview"
+		    Var bodyLine As String = chunkText
+		    Var nl As Integer = bodyLine.IndexOf(EndOfLine)
+		    If nl >= 0 Then bodyLine = bodyLine.Middle(nl + 1)
+		    bodyLine = bodyLine.Trim
+		    Var isMemberSignature As Boolean = bodyLine.Left(candidate.Length + 1) = candidate + "."
+		    If Not isOverviewTitle And Not isMemberSignature Then Return ""
+		  End If
+
 		  Return candidate
 		End Function
 	#tag EndMethod
@@ -513,10 +556,12 @@ Protected Class SemanticSearch
 		    ftsScores.Add(0.0)
 		  Next i
 
+		  Var ftsSafe As String = BuildMatchQuery(query)
 		  Try
-		    Var ftsRS As RowSet = mDB.SelectSQL( _
+		    Var ftsRS As RowSet
+		    If ftsSafe <> "" Then ftsRS = mDB.SelectSQL( _
 		      "SELECT rowid, bm25(chunks_fts) AS bm25_score FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 200", _
-		      query)
+		      ftsSafe)
 		    If ftsRS <> Nil Then
 		      // Build an ID→fts-score map by scanning results
 		      Var ftsMap As New Dictionary
@@ -551,7 +596,7 @@ Protected Class SemanticSearch
 		  Var combinedScores() As Double
 		  For i As Integer = 0 To scores.LastIndex
 		    Var score As Double = scores(i) * 0.7 + ftsScores(i) * 0.3
-		    Var className As String = ExtractClassName(titles(i))
+		    Var className As String = ExtractClassName(titles(i), texts(i))
 		    If className <> "" And queryLowerForBoost.IndexOf(className.Lowercase) >= 0 Then
 		      score = score + kClassNameBoost
 		    End If
@@ -746,7 +791,12 @@ Protected Class SemanticSearch
 
 	#tag Method, Flags = &h21
 		Private Function FetchEmbedding(text As String, timeoutMs As Integer = 10000) As MemoryBlock
-		  Var escapedText As String = EscapeJSON(text)
+		  // nomic-embed-text-v1.5 requires its "search_query: " task-instruction
+		  // prefix for asymmetric retrieval — every call here is query-time (XMCP
+		  // never indexes; XDOX's indexer prefixes chunk/note text with
+		  // "search_document: " on its side, per Embedder.kTaskPrefixDocument).
+		  // Keep this prefix in sync with XDOX's Embedder.kTaskPrefixQuery.
+		  Var escapedText As String = EscapeJSON("search_query: " + text)
 		  Var body As String = "{""model"":""nomic-embed-text.gguf"",""input"":""" + escapedText + """}"
 
 		  mHttpDone = False
