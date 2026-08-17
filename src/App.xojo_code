@@ -67,13 +67,16 @@ Inherits MCPKit.ServerApplication
 
 		  // The DB alone enables keyword (BM25) search; a running embedding server
 		  // (XDOX manages one on port 8089) upgrades it to hybrid semantic search.
-		  // Both are re-checked at search time — startup order no longer matters.
-		  SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", ragDB.NativePath)
+		  // A running reranker (XDOX manages one on port 8093) further improves
+		  // result ordering on top of that — independently degradable, same as
+		  // the embedding tier. All three are re-checked at search time —
+		  // startup order no longer matters.
+		  SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", "http://localhost:8093/v1/rerank", ragDB.NativePath)
 		  If Verbose Then
 		    If SemanticSearch.HasDatabase Then
 		      System.DebugLog("RAG database: " + ragDB.NativePath)
 		      If SemanticSearch.Available Then
-		        System.DebugLog("Semantic search enabled (hybrid).")
+		        System.DebugLog("Semantic search enabled (hybrid)" + If(SemanticSearch.RerankAvailable, " with reranking.", " — reranker not reachable, cosine+BM25 ordering only."))
 		      Else
 		        System.DebugLog("Embedding server not reachable — keyword (BM25) search only.")
 		      End If

@@ -1,15 +1,24 @@
 #tag Class
 Protected Class SemanticSearch
 	#tag Method, Flags = &h0
-		Sub Constructor(embeddingUrl As String, dbPath As String)
+		Sub Constructor(embeddingUrl As String, rerankUrl As String, dbPath As String)
 		  // Task 13: the DB connection and the embedding server are independent
 		  // tiers. A reachable DB alone enables keyword (BM25) search; the
 		  // embedding server upgrades it to hybrid semantic search. Both are
 		  // (re-)checked lazily at search time — XMCP typically starts with the
 		  // editor, i.e. BEFORE XDOX, so neither may exist yet at this point.
+		  //
+		  // The reranker is a THIRD, independently-degradable tier layered on top
+		  // of hybrid search — XDOX owns its lifecycle (model download, the
+		  // llama-server process); XMCP only ever probes it. A reranker that's
+		  // down or was never installed must not disable base hybrid search, so
+		  // its availability is tracked separately from mAvailable and probed
+		  // with its own cooldown.
 		  mEmbeddingUrl = embeddingUrl
+		  mRerankUrl = rerankUrl
 		  mDbPath = dbPath
 		  mAvailable = False
+		  mRerankAvailable = False
 		  mHasDatabase = False
 
 		  Call EnsureDatabase
@@ -78,6 +87,23 @@ Protected Class SemanticSearch
 		  If testEmb = Nil Then Return
 
 		  mAvailable = True
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub EnsureRerankAvailable()
+		  // Same lazy-probe-with-cooldown pattern as EnsureAvailable, but kept
+		  // fully independent: a down/never-installed reranker degrades Search()
+		  // back to cosine+BM25 ordering, it never disables hybrid search itself.
+		  If mRerankAvailable Then Return
+
+		  If mLastRerankProbeMicros > 0 And Microseconds - mLastRerankProbeMicros < kProbeCooldownMicros Then Return
+		  mLastRerankProbeMicros = Microseconds
+
+		  Var testScores() As Double = FetchRerankScores("test", Array("test document"), 2000)
+		  If testScores.Count = 0 Then Return
+
+		  mRerankAvailable = True
 		End Sub
 	#tag EndMethod
 
@@ -290,15 +316,22 @@ Protected Class SemanticSearch
 		  If safe <> "" Then
 		    Try
 		      Var ftsMap As New Dictionary
+		      // ORDER BY is load-bearing — see the chunks-leg fix below for why
+		      // an unordered LIMIT on a broad OR-matched query silently drops
+		      // the actually-relevant rows (confirmed live on the XDOX side).
 		      Var ftsRS As RowSet = mDB.SelectSQL( _
-		        "SELECT rowid, bm25(notes_fts) AS s FROM notes_fts WHERE notes_fts MATCH ? LIMIT 100", safe)
+		        "SELECT rowid, bm25(notes_fts) AS s FROM notes_fts WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) LIMIT 100", safe)
 		      Do Until ftsRS.AfterLastRow
 		        ftsMap.Value(ftsRS.Column("rowid").IntegerValue) = 1.0 / (1.0 + Exp(ftsRS.Column("s").DoubleValue * 0.5))
 		        ftsRS.MoveToNextRow
 		      Loop
 		      ftsRS.Close
+		      // NOT CDbl(Variant) — confirmed live on the XDOX side (same
+		      // pattern, ported here) to mis-parse a Double-typed Dictionary
+		      // Variant under a comma-decimal locale, inflating e.g. 0.097 to
+		      // ~9.7e14. DoubleValue reads the Variant's binary double directly.
 		      For i As Integer = 0 To rowids.LastIndex
-		        If ftsMap.HasKey(rowids(i)) Then ftsScores(i) = CDbl(ftsMap.Value(rowids(i)))
+		        If ftsMap.HasKey(rowids(i)) Then ftsScores(i) = ftsMap.Value(rowids(i)).DoubleValue
 		      Next i
 		    Catch e As DatabaseException
 		      // FTS unavailable — cosine-only.
@@ -485,6 +518,13 @@ Protected Class SemanticSearch
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
+		Function RerankAvailable() As Boolean
+		  EnsureRerankAvailable
+		  Return mRerankAvailable
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
 		Function Search(query As String, maxResults As Integer) As String
 		  If Not mAvailable Then Return ""
 		  If mDB = Nil Then Return ""
@@ -559,8 +599,18 @@ Protected Class SemanticSearch
 		  Var ftsSafe As String = BuildMatchQuery(query)
 		  Try
 		    Var ftsRS As RowSet
+		    // ORDER BY is load-bearing, not cosmetic: BuildMatchQuery OR-joins
+		    // every sanitized token, so a conversational query can MATCH tens
+		    // of thousands of rows on common words alone. Without an explicit
+		    // order, SQLite returns an ARBITRARY 200-row slice under LIMIT —
+		    // confirmed live on the XDOX side to silently drop the actually-
+		    // relevant chunks (strong true BM25 matches) while keeping
+		    // irrelevant ones that merely survived the truncation, which then
+		    // won the hybrid ranking because their FTS leg normalized to ~0.99
+		    // while the true match's leg silently defaulted to 0.0 (never
+		    // found in the truncated slice at all).
 		    If ftsSafe <> "" Then ftsRS = mDB.SelectSQL( _
-		      "SELECT rowid, bm25(chunks_fts) AS bm25_score FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 200", _
+		      "SELECT rowid, bm25(chunks_fts) AS bm25_score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT 200", _
 		      ftsSafe)
 		    If ftsRS <> Nil Then
 		      // Build an ID→fts-score map by scanning results
@@ -575,10 +625,11 @@ Protected Class SemanticSearch
 		        ftsRS.MoveToNextRow
 		      Loop
 		      ftsRS.Close
-		      // Apply FTS scores to our result array
+		      // Apply FTS scores to our result array. NOT CDbl(Variant) — see
+		      // SearchNotesHybrid's ftsMap fix above for why.
 		      For i As Integer = 0 To chunkIDs.LastIndex
 		        If ftsMap.HasKey(chunkIDs(i)) Then
-		          ftsScores(i) = CDbl(ftsMap.Value(chunkIDs(i)))
+		          ftsScores(i) = ftsMap.Value(chunkIDs(i)).DoubleValue
 		        End If
 		      Next i
 		    End If
@@ -638,7 +689,8 @@ Protected Class SemanticSearch
 		    Var src As String = sources(idx)
 		    Var sc As Double = combinedScores(idx)
 		    If sourceLastScore.HasKey(src) Then
-		      Var prevScore As Double = CDbl(sourceLastScore.Value(src))
+		      // NOT CDbl(Variant) — see the ftsMap fixes above for why.
+		      Var prevScore As Double = sourceLastScore.Value(src).DoubleValue
 		      // Keep the chunk only if it adds meaningfully different content from the same source.
 		      If Abs(sc - prevScore) < kDedupeScoreDelta Then Continue
 		    End If
@@ -646,6 +698,64 @@ Protected Class SemanticSearch
 		    includedIDs.Value(chunkIDs(idx)) = True
 		    finalIdxs.Add(idx)
 		  Next
+
+		  // --- Reranking: ported from XDOX Retrieval.HybridSearchChunks ---
+		  // A cross-encoder pass over the already-selected candidates that
+		  // reorders by real query-document relevance instead of trusting
+		  // cosine+BM25 alone. XMCP does NOT hard-gate on this the way XDOX's
+		  // chat UI does (never withholds results outright) — an LLM caller may
+		  // legitimately want to see low-relevance candidates and judge them
+		  // itself. But it DOES surface the best score explicitly in the
+		  // response header below: a raw chunk dump with no confidence signal
+		  // has the same failure mode XDOX's chat model had (nothing
+		  // distinguishes "good match" from "best of a bad set"), and the
+		  // caller burns tokens/risks synthesizing a wrong answer from
+		  // marginally-relevant chunks exactly like XDOX did before this was
+		  // fixed. Pure fallback if the reranker is down or was never
+		  // installed (XDOX owns its lifecycle, not XMCP): finalIdxs keeps its
+		  // existing cosine+BM25 order and bestRerankScore stays -1 (no line
+		  // added to the header).
+		  Var bestRerankScore As Double = -1.0
+		  EnsureRerankAvailable
+		  If mRerankAvailable And finalIdxs.Count > 0 Then
+		    Var candidateTexts() As String
+		    For Each idx As Integer In finalIdxs
+		      candidateTexts.Add(texts(idx))
+		    Next
+		    Var rerankScores() As Double = FetchRerankScores(query, candidateTexts)
+		    If rerankScores.Count = 0 Then
+		      // Server died since the last probe — drop the tier and let the
+		      // cooldown re-probe pick it back up when it returns.
+		      mRerankAvailable = False
+		      mLastRerankProbeMicros = Microseconds
+		    ElseIf rerankScores.Count = finalIdxs.Count Then
+		      // Pair each finalIdxs slot with its rerank score, then sort
+		      // descending — a small array (<= maxResults*2), insertion sort is
+		      // plenty and keeps this dependency-free.
+		      Var order() As Integer
+		      For i As Integer = 0 To finalIdxs.LastIndex
+		        order.Add(i)
+		      Next i
+		      For i As Integer = 1 To order.LastIndex
+		        Var key As Integer = order(i)
+		        Var keyScore As Double = rerankScores(key)
+		        Var j As Integer = i - 1
+		        While j >= 0 And rerankScores(order(j)) < keyScore
+		          order(j + 1) = order(j)
+		          j = j - 1
+		        Wend
+		        order(j + 1) = key
+		      Next i
+		      Var rerankedIdxs() As Integer
+		      Var bestScore As Double = -2.0
+		      For Each pos As Integer In order
+		        rerankedIdxs.Add(finalIdxs(pos))
+		        If rerankScores(pos) > bestScore Then bestScore = rerankScores(pos)
+		      Next
+		      finalIdxs = rerankedIdxs
+		      bestRerankScore = bestScore
+		    End If
+		  End If
 
 		  // --- Neighbour expansion (#6): for high-score chunks, pull adjacent chunks ---
 		  Var kNeighbourThreshold As Double = 0.72
@@ -759,6 +869,17 @@ Protected Class SemanticSearch
 		  Var headerVersion As String = If(activeVersion <> "", activeVersion, mDocsVersion)
 		  If headerVersion <> "" Then header = header + ", " + headerVersion
 		  header = header + "):"
+		  // Surface the reranker's confidence explicitly rather than silently
+		  // returning a raw chunk dump — same threshold as XDOX's
+		  // Reranker.kNoMatchThreshold, kept in sync manually (no shared
+		  // constant between the two apps). bestRerankScore stays -1 when no
+		  // rerank signal is available (server down/not installed), in which
+		  // case this line is omitted entirely rather than claiming low
+		  // confidence it can't actually measure.
+		  If bestRerankScore >= 0.0 And bestRerankScore < 0.9 Then
+		    header = header + EndOfLine + "Note: none of these results closely match the query (reranker confidence " _
+		      + Format(bestRerankScore, "0.00") + ") — verify before treating them as confirming this feature exists."
+		  End If
 		  Var output As String = header + _
 		    EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
 
@@ -825,6 +946,86 @@ Protected Class SemanticSearch
 
 		  Return ParseEmbeddingJSON(mHttpBody)
 
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function FetchRerankScores(query As String, candidates() As String, timeoutMs As Integer = 10000) As Double()
+		  // POST /v1/rerank on XDOX's reranker server (port 8093, XDOX-managed —
+		  // same relationship as the embedding server on 8089). Mirrors XDOX's
+		  // Reranker.RerankBatch: one relevance score per candidate, empty array
+		  // on any failure so the caller degrades to its existing ranking rather
+		  // than treating "reranker down" as a hard error.
+		  Var result() As Double
+		  If candidates.Count = 0 Then Return result
+
+		  Var body As New JSONItem
+		  body.Value("model") = "qwen3-reranker-0.6b.gguf"
+		  body.Value("query") = query
+		  Var docs As New JSONItem
+		  For Each c As String In candidates
+		    docs.Add(c)
+		  Next
+		  body.Value("documents") = docs
+
+		  mHttpDone = False
+		  mHttpBody = ""
+		  mHttpStatus = 0
+
+		  Var http As New URLConnection
+		  AddHandler http.ContentReceived, AddressOf HttpContentReceived
+		  AddHandler http.Error, AddressOf HttpError
+		  http.RequestHeader("Content-Type") = "application/json"
+		  http.SetRequestContent(body.ToString, "application/json")
+
+		  Try
+		    http.Send("POST", mRerankUrl)
+		  Catch e As RuntimeException
+		    Return result
+		  End Try
+
+		  Var timeout As Integer = 0
+		  While Not mHttpDone And timeout < timeoutMs
+		    App.DoEvents(10)
+		    timeout = timeout + 10
+		  Wend
+
+		  If Not mHttpDone Or mHttpStatus <> 200 Then Return result
+
+		  Return ParseRerankJSON(mHttpBody, candidates.Count)
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function ParseRerankJSON(json As String, expectedCount As Integer) As Double()
+		  // Response: {"results":[{"index":0,"relevance_score":0.97},...]} — same
+		  // defensive, index-keyed parse as XDOX's Reranker.ParseRerankResponse.
+		  Var result() As Double
+		  Try
+		    Var root As New JSONItem(json)
+		    If Not root.HasKey("results") Then Return result
+		    Var resultsArray As JSONItem = root.Child("results")
+		    If resultsArray = Nil Or resultsArray.Count = 0 Then Return result
+
+		    result.ResizeTo(expectedCount - 1)
+		    For i As Integer = 0 To expectedCount - 1
+		      result(i) = 0.0
+		    Next i
+
+		    For d As Integer = 0 To resultsArray.Count - 1
+		      Var item As JSONItem = resultsArray.ChildAt(d)
+		      If Not item.HasKey("relevance_score") Then Continue
+
+		      Var idx As Integer = d
+		      If item.HasKey("index") Then idx = item.Value("index").IntegerValue
+		      If idx < 0 Or idx > result.LastIndex Then Continue
+
+		      result(idx) = item.Value("relevance_score").DoubleValue
+		    Next d
+		  Catch e As RuntimeException
+		    Return result
+		  End Try
+		  Return result
 		End Function
 	#tag EndMethod
 
@@ -923,7 +1124,15 @@ Protected Class SemanticSearch
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
+		Private mRerankAvailable As Boolean
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
 		Private mEmbeddingUrl As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h21
+		Private mRerankUrl As String
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -979,6 +1188,11 @@ Protected Class SemanticSearch
 	// Microseconds timestamp of the last (failed) embedding-server probe.
 	#tag Property, Flags = &h21
 		Private mLastProbeMicros As Double
+	#tag EndProperty
+
+	// Microseconds timestamp of the last (failed) reranker-server probe.
+	#tag Property, Flags = &h21
+		Private mLastRerankProbeMicros As Double
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
