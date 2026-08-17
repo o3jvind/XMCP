@@ -502,6 +502,65 @@ Protected Class SemanticSearch
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
+		Private Function TargetPlatformLabel(title As String) As String
+		  // Ported from XDOX Retrieval.TargetPlatformLabel. Xojo's native-doc
+		  // class names carry their target platform as a naming prefix
+		  // (DesktopButton, WebPage, iOSCountdownPicker, ConsoleApplication) — a
+		  // real, documented Xojo convention, not something inferred here.
+		  // Confirmed live on the XDOX side: asking about showing a webpage
+		  // retrieved WebPage (a Web-target server-side page class whose
+		  // GotoURL/ExecuteJavaScript methods read as plausible cosine matches
+		  // for "webpage") with nothing in the delivered chunk text
+		  // distinguishing it from a desktop-app answer. XMCP is a general Xojo
+		  // assistant tool, not Desktop-only, so excluding non-Desktop classes
+		  // from results was rejected — the fix makes the target explicit in the
+		  // returned text instead of hiding non-Desktop results. Only labels
+		  // when a prefix is recognized, so cross-platform classes (FolderItem,
+		  // String, Dictionary) are left unlabeled. Keep in sync with XDOX
+		  // Retrieval.TargetPlatformLabel.
+		  Var sepPos As Integer = title.IndexOf(".")
+		  Var arrowPos As Integer = title.IndexOf(" > ")
+		  If arrowPos >= 0 And (sepPos < 0 Or arrowPos < sepPos) Then sepPos = arrowPos
+		  If sepPos < 4 Then Return ""
+		  Var candidate As String = title.Left(sepPos)
+
+		  // Exact-case prefix checks — NOT the string >=/<= operators, which are
+		  // case-insensitive by default in Xojo and would otherwise make e.g.
+		  // "desktopfoo" match "Desktop" too. StartsWithExact does an ordinal
+		  // (Asc-based) per-character compare instead.
+		  If StartsWithExact(candidate, "Desktop") Then Return "[Desktop-target class] "
+		  If StartsWithExact(candidate, "iOS") Then Return "[iOS-target class] "
+		  If StartsWithExact(candidate, "Console") Then Return "[Console-target class] "
+		  If StartsWithExact(candidate, "Android") Then Return "[Android-target class] "
+		  // "Web" alone would also match "WebService"/"WebFile" (still
+		  // Web-target, fine) but must not match unrelated words that merely
+		  // start with those letters — Xojo's own naming convention already
+		  // guarantees a target-prefixed class name is followed by an uppercase
+		  // letter (WebPage, not "Webpage"), so require that too.
+		  If StartsWithExact(candidate, "Web") And candidate.Length > 3 Then
+		    Var nextCode As Integer = candidate.Middle(3, 1).Asc
+		    If nextCode >= 65 And nextCode <= 90 Then Return "[Web-target class — server-side web app, not desktop] "
+		  End If
+		  Return ""
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function StartsWithExact(s As String, prefix As String) As Boolean
+		  // Case-SENSITIVE prefix check — String.Left(n) = "..." uses Xojo's
+		  // default case-insensitive comparison, which would match "desktopfoo"
+		  // against "Desktop" too. Xojo class names always use the documented
+		  // capitalization, so an exact match is correct here.
+		  If s.Length < prefix.Length Then Return False
+		  Var lhs As String = s.Left(prefix.Length)
+		  For i As Integer = 0 To prefix.Length - 1
+		    If lhs.Middle(i, 1).Asc <> prefix.Middle(i, 1).Asc Then Return False
+		  Next
+		  Return True
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
 		Private Function QueryNamesClass(queryLower As String, classNameLower As String) As Boolean
 		  // Ported from XDOX Retrieval.QueryNamesClass. A plain IndexOf substring
 		  // check matches "WebView" inside "desktopwkwebviewcontrolmbs" —
@@ -903,6 +962,7 @@ Protected Class SemanticSearch
 
 		  // Render results
 		  Var results() As String
+		  Var anyPlatformLabel As Boolean = False
 		  For Each src As String In sourceOrder
 		    If Not sourceChunks.HasKey(src) Then Continue
 		    Var srcMap As Dictionary = sourceChunks.Value(src)
@@ -924,7 +984,9 @@ Protected Class SemanticSearch
 
 		    For Each cidx As Integer In idxKeys
 		      Var ai As Integer = srcMap.Value(cidx)
-		      results.Add("--- " + titles(ai) + " ---" + EndOfLine + texts(ai))
+		      Var platformLabel As String = TargetPlatformLabel(titles(ai))
+		      If platformLabel <> "" Then anyPlatformLabel = True
+		      results.Add("--- " + titles(ai) + " ---" + EndOfLine + platformLabel + texts(ai))
 		    Next
 		  Next
 
@@ -944,6 +1006,21 @@ Protected Class SemanticSearch
 		  If bestRerankScore >= 0.0 And bestRerankScore < 0.9 Then
 		    header = header + EndOfLine + "Note: none of these results closely match the query (reranker confidence " _
 		      + Format(bestRerankScore, "0.00") + ") — verify before treating them as confirming this feature exists."
+		  End If
+		  // Xojo targets multiple platforms (Desktop, Web, iOS, Console, Android)
+		  // with different, incompatible class libraries. A class tagged
+		  // "[Web-target class]" etc. below only exists for that platform — a
+		  // result being present does NOT mean the feature is available on
+		  // whatever platform the caller's user actually asked about. Ported
+		  // from XDOX's system-prompt rule (XDOXSession.ClosingReminders):
+		  // confirmed live there that without an explicit instruction, a model
+		  // reading a Web-target chunk answered a desktop-app question with an
+		  // unqualified "Yes" and then contradicted itself, or invented a
+		  // plausible-sounding desktop class name that doesn't exist.
+		  If anyPlatformLabel Then
+		    header = header + EndOfLine + "Note: one or more results below are tagged with their Xojo target " _
+		      + "platform — do not treat a result for one platform (e.g. Web-target) as confirming the same " _
+		      + "feature exists on a different platform (e.g. Desktop) the caller may actually be asking about."
 		  End If
 		  Var output As String = header + _
 		    EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
