@@ -501,6 +501,39 @@ Protected Class SemanticSearch
 		End Function
 	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Function QueryNamesClass(queryLower As String, classNameLower As String) As Boolean
+		  // Ported from XDOX Retrieval.QueryNamesClass. A plain IndexOf substring
+		  // check matches "WebView" inside "desktopwkwebviewcontrolmbs" —
+		  // confirmed live on the XDOX side that asking about
+		  // DesktopWKWebViewControlMBS spuriously pulled in WebView's chunks (an
+		  // unrelated Xojo Web-target class) because "webview" is a literal
+		  // substring of the longer class name, which then fed the model an
+		  // off-topic Overview chunk it stitched into inventing a nonexistent
+		  // control. Requiring word boundaries (neither the character before nor
+		  // after the match may be alphanumeric) keeps the intended case — a
+		  // class name appearing as its own word/token in the query — while
+		  // rejecting one class name that merely happens to be a substring of
+		  // another, longer one. Keep in sync with XDOX Retrieval.QueryNamesClass.
+		  Var pos As Integer = queryLower.IndexOf(classNameLower)
+		  While pos >= 0
+		    Var beforeOk As Boolean = (pos = 0) Or Not IsAlnumChar(queryLower.Middle(pos - 1, 1))
+		    Var afterPos As Integer = pos + classNameLower.Length
+		    Var afterOk As Boolean = (afterPos >= queryLower.Length) Or Not IsAlnumChar(queryLower.Middle(afterPos, 1))
+		    If beforeOk And afterOk Then Return True
+		    pos = queryLower.IndexOf(pos + 1, classNameLower)
+		  Wend
+		  Return False
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function IsAlnumChar(ch As String) As Boolean
+		  If ch = "" Then Return False
+		  Return (ch >= "a" And ch <= "z") Or (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9")
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h0
 		Sub Destructor()
 		  If mDB <> Nil Then
@@ -643,13 +676,27 @@ Protected Class SemanticSearch
 		  // "DesktopWKWebViewControlMBS" from "DesktopWebView2ControlMBS" (both
 		  // score ~0.75 against a query naming the former), so an explicit
 		  // substring match on a named class overrides a close cosine race.
+		  //
+		  // While scoring: also note which chunk (if any) IS the matched class's
+		  // own "ClassName > Overview" page — overviewIdx, guaranteed into the
+		  // results below rather than left to compete on score. Ported from XDOX
+		  // Retrieval.HybridSearchChunks: kClassNameBoost applies identically to
+		  // EVERY chunk of a matched class, so it gives a class's own Overview
+		  // chunk no relative edge over that same class's specific member
+		  // chunks — confirmed live on the XDOX side that a flat Overview-only
+		  // boost on top of kClassNameBoost was still insufficient (per-chunk
+		  // score spread is too wide to safely tune a constant to), so
+		  // deterministic inclusion (same pattern as PinnedMigrationResults) is
+		  // used instead of trying to out-tune the score race.
 		  Var queryLowerForBoost As String = query.Lowercase
 		  Var combinedScores() As Double
+		  Var overviewIdx As Integer = -1
 		  For i As Integer = 0 To scores.LastIndex
 		    Var score As Double = scores(i) * 0.7 + ftsScores(i) * 0.3
 		    Var className As String = ExtractClassName(titles(i), texts(i))
-		    If className <> "" And queryLowerForBoost.IndexOf(className.Lowercase) >= 0 Then
+		    If className <> "" And QueryNamesClass(queryLowerForBoost, className.Lowercase) Then
 		      score = score + kClassNameBoost
+		      If overviewIdx < 0 And titles(i) = className + " > Overview" Then overviewIdx = i
 		    End If
 		    combinedScores.Add(score)
 		  Next i
@@ -698,6 +745,24 @@ Protected Class SemanticSearch
 		    includedIDs.Value(chunkIDs(idx)) = True
 		    finalIdxs.Add(idx)
 		  Next
+
+		  // Guarantee the matched class's own Overview chunk survives into
+		  // finalIdxs even if it lost the score race above — see the comment on
+		  // overviewIdx. If it's not already in (the common case — that's the
+		  // bug this exists to fix), bump the weakest current slot rather than
+		  // growing past maxResults. Ported from XDOX Retrieval.HybridSearchChunks.
+		  If overviewIdx >= 0 And Not includedIDs.HasKey(chunkIDs(overviewIdx)) Then
+		    If finalIdxs.Count < maxResults Then
+		      finalIdxs.Add(overviewIdx)
+		    Else
+		      Var weakestPos As Integer = 0
+		      For p As Integer = 1 To finalIdxs.LastIndex
+		        If combinedScores(finalIdxs(p)) < combinedScores(finalIdxs(weakestPos)) Then weakestPos = p
+		      Next
+		      finalIdxs(weakestPos) = overviewIdx
+		    End If
+		    includedIDs.Value(chunkIDs(overviewIdx)) = True
+		  End If
 
 		  // --- Reranking: ported from XDOX Retrieval.HybridSearchChunks ---
 		  // A cross-encoder pass over the already-selected candidates that
