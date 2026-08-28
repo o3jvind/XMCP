@@ -593,6 +593,53 @@ Protected Class SemanticSearch
 		End Function
 	#tag EndMethod
 
+	#tag Method, Flags = &h21
+		Private Function QueryNamesAnyClass(query As String) As Boolean
+		  // Ported from XDOX Retrieval.ChunkSearchLimit's PascalCase-word
+		  // heuristic (same shape as XDOX SymbolCheck.ExtractPascalCaseWords):
+		  // a word starting with an uppercase letter, all alphanumeric, and
+		  // containing at least one lowercase letter is treated as a class
+		  // name — this rules out ALL-CAPS acronyms like "URL" or "HTML"
+		  // (common English/tech words, not class names) which would
+		  // otherwise widen maxResults for every query that merely mentions
+		  // one. Kept as its own small check rather than reusing
+		  // QueryNamesClass, which needs a specific className to test
+		  // against — this only needs to know SOME class-shaped word is
+		  // present, not which one.
+		  For Each word As String In query.Split(" ")
+		    Var w As String = word
+		    While w.Length > 0 And Not IsAlnumChar(w.Left(1))
+		      w = w.Middle(1)
+		    Wend
+		    While w.Length > 0 And Not IsAlnumChar(w.Right(1))
+		      w = w.Left(w.Length - 1)
+		    Wend
+		    If w.Length < kMinClassWordLength Then Continue
+		    // NOT w.Left(1) >= "A" And w.Left(1) <= "Z" — Xojo's string
+		    // comparison operators are case-insensitive by default (see
+		    // ExtractClassName's isAlnum comment for the same pitfall
+		    // elsewhere in this file), which would make this match ANY
+		    // starting letter, not just uppercase. .Asc gives the ordinal
+		    // code point for a true case-sensitive check.
+		    Var firstCode As Integer = w.Left(1).Asc
+		    If firstCode < 65 Or firstCode > 90 Then Continue // must start uppercase
+		    Var hasLower As Boolean = False
+		    Var allAlnum As Boolean = True
+		    For i As Integer = 1 To w.Length - 1
+		      Var ch As String = w.Middle(i, 1)
+		      If Not IsAlnumChar(ch) Then
+		        allAlnum = False
+		        Exit
+		      End If
+		      Var code As Integer = ch.Asc
+		      If code >= 97 And code <= 122 Then hasLower = True
+		    Next
+		    If allAlnum And hasLower Then Return True
+		  Next
+		  Return False
+		End Function
+	#tag EndMethod
+
 	#tag Method, Flags = &h0
 		Sub Destructor()
 		  If mDB <> Nil Then
@@ -620,6 +667,26 @@ Protected Class SemanticSearch
 		Function Search(query As String, maxResults As Integer) As String
 		  If Not mAvailable Then Return ""
 		  If mDB = Nil Then Return ""
+
+		  // Ported from XDOX Retrieval.ChunkSearchLimit. Unlike XDOX (which
+		  // called SearchChunks with a hardcoded 4), XMCP's maxResults comes
+		  // from the calling LLM/agent — this only RAISES it as a floor, so
+		  // an explicit caller request for more results is still honoured. A
+		  // query naming a specific Xojo class (PascalCase word, e.g.
+		  // "DesktopWKWebViewControlMBS") is asking about ONE class's API
+		  // surface, not a broad topic — a narrow maxResults can fill up
+		  // entirely with that class's own chunks (via kClassNameBoost) and
+		  // still miss the one member that actually answers the question.
+		  // Confirmed live on the XDOX side (see the retrieval-quality
+		  // backlog): a class-named query filled all 4 default slots with a
+		  // Type: event and a read-only property instead of the one real
+		  // method that answered the question. MUST happen before cacheKey
+		  // is built below — the cache key includes maxResults, so adjusting
+		  // it after would make a search run at one limit while the cache
+		  // records another.
+		  If QueryNamesAnyClass(query) And maxResults < kWidenedChunkLimit Then
+		    maxResults = kWidenedChunkLimit
+		  End If
 
 		  // Read fresh so a live version switch in XDOX takes effect immediately —
 		  // and so the cache never serves another version's results.
@@ -1355,6 +1422,12 @@ Protected Class SemanticSearch
 
 	// Flat score boost when the query names a chunk's class exactly (matches XDOX).
 	#tag Constant, Name = kClassNameBoost, Type = Double, Dynamic = False, Default = \"0.15", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kWidenedChunkLimit, Type = Double, Dynamic = False, Default = \"7", Scope = Private
+	#tag EndConstant
+
+	#tag Constant, Name = kMinClassWordLength, Type = Double, Dynamic = False, Default = \"4", Scope = Private
 	#tag EndConstant
 
 	// Re-probe a down embedding server at most this often (30 s).
