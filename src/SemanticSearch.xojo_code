@@ -594,6 +594,29 @@ Protected Class SemanticSearch
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
+		Private Function QueryNamesNonDesktopPlatform(query As String) As Boolean
+		  // Ported from XDOX Retrieval.QueryNamesNonDesktopPlatform. Whole-word
+		  // check (not a bare IndexOf substring) for the same reason
+		  // QueryNamesClass requires word boundaries — "web" as a substring
+		  // would match "webpage", "website" etc. in ordinary English, not
+		  // just an explicit platform mention. Used by Search() to decide
+		  // whether a Web/iOS/Console/Android native result should count as a
+		  // genuine "native was found" for the allThirdParty/bothFound
+		  // decision — it should, ONLY when the user is actually asking about
+		  // that platform, not when they asked a plain "does Xojo have a
+		  // native way" question and a wrong-platform chunk happened to
+		  // score above the noise floor. Keep in sync with XDOX
+		  // Retrieval.QueryNamesNonDesktopPlatform.
+		  Var lower As String = " " + query.Lowercase + " "
+		  Var candidates() As String = Array(" web ", " ios ", " console ", " android ")
+		  For Each c As String In candidates
+		    If lower.IndexOf(c) >= 0 Then Return True
+		  Next
+		  Return False
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
 		Private Function QueryNamesAnyClass(query As String) As Boolean
 		  // Ported from XDOX Retrieval.ChunkSearchLimit's PascalCase-word
 		  // heuristic (same shape as XDOX SymbolCheck.ExtractPascalCaseWords):
@@ -707,22 +730,18 @@ Protected Class SemanticSearch
 		    Return ""
 		  End If
 
-		  // --- Vector search: score all embedded chunks (#12 persistent connection) ---
-		  // Multi-version: restrict to the active version plus version-independent
-		  // chunks (docs_version='') and MBS docset chunks (docs_version=kMBSDocsVersion);
-		  // skipped on legacy DBs without the column. Keep in sync with XDOX
-		  // Retrieval.HybridSearchChunks. (activeVersion read above.)
-		  Var rs As RowSet
-		  Try
-		    If mHasChunkVersion Then
-		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ? OR c.docs_version = '' OR c.docs_version = ?", activeVersion, kMBSDocsVersion)
-		    Else
-		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id")
-		    End If
-		  Catch e As DatabaseException
-		    Return ""
-		  End Try
-
+		  // Ported from XDOX Retrieval.HybridSearchChunks (Task 7): native and
+		  // MBS (third-party) docs are searched as two separate scoped pools
+		  // instead of one shared cosine/BM25 race, so the two sources can
+		  // never crowd each other out — without this, the caller/model would
+		  // see only whichever source happened to score highest on a given
+		  // phrasing. Each pool gets its own scan/scoring/dedup/Overview
+		  // guarantee (ScopedSearch, shared code); only reranking and
+		  // neighbour expansion run once, over the merged, capped set. Needs
+		  // docs_version to distinguish native from MBS at all — a legacy DB
+		  // without the column falls back to the old single-pool query (see
+		  // the Else branch below). Keep in sync with XDOX
+		  // Retrieval.HybridSearchChunks.
 		  Var chunkIDs() As Integer
 		  Var titles() As String
 		  Var texts() As String
@@ -731,164 +750,175 @@ Protected Class SemanticSearch
 		  Var prevIDs() As Integer
 		  Var nextIDs() As Integer
 		  Var scores() As Double
+		  Var combinedScores() As Double
+		  Var finalIdxs() As Integer
+		  Var guaranteedChunkIDs As New Dictionary
 
-		  Do Until rs.AfterLastRow
-		    Var embBlob As MemoryBlock = rs.Column("embedding").BlobValue
-		    If embBlob <> Nil And embBlob.Size > 0 Then
-		      Var score As Double = CosineSimilarity(queryEmb, embBlob)
-		      chunkIDs.Add(rs.Column("id").IntegerValue)
-		      titles.Add(rs.Column("title").StringValue)
-		      texts.Add(rs.Column("chunk_text").StringValue)
-		      sources.Add(rs.Column("source").StringValue)
-		      chunkIndexes.Add(rs.Column("chunk_index").IntegerValue)
-		      prevIDs.Add(rs.Column("prev_id").IntegerValue)
-		      nextIDs.Add(rs.Column("next_id").IntegerValue)
-		      scores.Add(score)
+		  If mHasChunkVersion Then
+		    Var nativeHalf As Integer = (maxResults + 1) \ 2 // ceiling
+		    Var mbsHalf As Integer = maxResults - nativeHalf
+
+		    Var native As New ScopedSearchResult
+		    Var mbs As New ScopedSearchResult
+		    ScopedSearch(query, queryEmb, nativeHalf, activeVersion, False, native)
+		    ScopedSearch(query, queryEmb, mbsHalf, activeVersion, True, mbs)
+
+		    // Neither pool is forced to fill its half with weak matches — a
+		    // pool that came back short (or empty) lets the OTHER pool use
+		    // the freed slots. ">=" (not ">") is deliberate: ScopedSearch's
+		    // own dedup loop hard-caps a pool's FinalIdxs at what it was
+		    // asked for, so Count can never exceed its half — ">=" means
+		    // "filled its entire allocated quota", the actual signal that
+		    // re-asking for a larger share is worth trying. Ported from XDOX
+		    // Retrieval.HybridSearchChunks.
+		    If native.FinalIdxs.Count < nativeHalf And mbs.FinalIdxs.Count >= mbsHalf Then
+		      Var spare As Integer = nativeHalf - native.FinalIdxs.Count
+		      ScopedSearch(query, queryEmb, mbsHalf + spare, activeVersion, True, mbs)
+		    ElseIf mbs.FinalIdxs.Count < mbsHalf And native.FinalIdxs.Count >= nativeHalf Then
+		      Var spare As Integer = mbsHalf - mbs.FinalIdxs.Count
+		      ScopedSearch(query, queryEmb, nativeHalf + spare, activeVersion, False, native)
 		    End If
-		    rs.MoveToNextRow
-		  Loop
-		  rs.Close
 
-		  // --- FTS5 hybrid scoring (#1): boost vector scores with full-text rank ---
-		  Var ftsScores() As Double
-		  For i As Integer = 0 To chunkIDs.LastIndex
-		    ftsScores.Add(0.0)
-		  Next i
+		    // Native first, always — deterministic ordering rather than
+		    // whichever side scored higher, so "which source leads" doesn't
+		    // vary between otherwise-similar questions. Rendering below uses
+		    // this ordering to lay results out as two labeled blocks.
+		    MergeScopedResult(native, chunkIDs, titles, texts, sources, chunkIndexes, prevIDs, nextIDs, combinedScores, scores, finalIdxs)
+		    MergeScopedResult(mbs, chunkIDs, titles, texts, sources, chunkIndexes, prevIDs, nextIDs, combinedScores, scores, finalIdxs)
 
-		  Var ftsSafe As String = BuildMatchQuery(query)
-		  Try
-		    Var ftsRS As RowSet
-		    // ORDER BY is load-bearing, not cosmetic: BuildMatchQuery OR-joins
-		    // every sanitized token, so a conversational query can MATCH tens
-		    // of thousands of rows on common words alone. Without an explicit
-		    // order, SQLite returns an ARBITRARY 200-row slice under LIMIT —
-		    // confirmed live on the XDOX side to silently drop the actually-
-		    // relevant chunks (strong true BM25 matches) while keeping
-		    // irrelevant ones that merely survived the truncation, which then
-		    // won the hybrid ranking because their FTS leg normalized to ~0.99
-		    // while the true match's leg silently defaulted to 0.0 (never
-		    // found in the truncated slice at all).
-		    If ftsSafe <> "" Then ftsRS = mDB.SelectSQL( _
-		      "SELECT rowid, bm25(chunks_fts) AS bm25_score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT 200", _
-		      ftsSafe)
-		    If ftsRS <> Nil Then
-		      // Build an ID→fts-score map by scanning results
-		      Var ftsMap As New Dictionary
-		      Do Until ftsRS.AfterLastRow
-		        Var rid As Integer = ftsRS.Column("rowid").IntegerValue
-		        // bm25() returns negative values; more negative = better match
-		        Var bm25 As Double = ftsRS.Column("bm25_score").DoubleValue
-		        // Normalise to [0,1]: map bm25 from (-∞,0] to [0,1] via simple sigmoid-like clamp
-		        Var normScore As Double = 1.0 / (1.0 + Exp(bm25 * 0.5))
-		        ftsMap.Value(rid) = normScore
-		        ftsRS.MoveToNextRow
-		      Loop
-		      ftsRS.Close
-		      // Apply FTS scores to our result array. NOT CDbl(Variant) — see
-		      // SearchNotesHybrid's ftsMap fix above for why.
-		      For i As Integer = 0 To chunkIDs.LastIndex
-		        If ftsMap.HasKey(chunkIDs(i)) Then
-		          ftsScores(i) = ftsMap.Value(chunkIDs(i)).DoubleValue
+		    If native.OverviewChunkID > 0 Then guaranteedChunkIDs.Value(native.OverviewChunkID) = True
+		    If mbs.OverviewChunkID > 0 Then guaranteedChunkIDs.Value(mbs.OverviewChunkID) = True
+		  Else
+		    // Legacy DB without docs_version — can't distinguish native from
+		    // MBS, so fall back to the old single-pool query across
+		    // everything. finalIdxs/combinedScores/etc. below are populated
+		    // the same way ScopedSearch does it internally, just unscoped.
+		    Var rs As RowSet
+		    Try
+		      rs = mDB.SelectSQL("SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id")
+		    Catch e As DatabaseException
+		      Return ""
+		    End Try
+
+		    Do Until rs.AfterLastRow
+		      Var embBlob As MemoryBlock = rs.Column("embedding").BlobValue
+		      If embBlob <> Nil And embBlob.Size > 0 Then
+		        chunkIDs.Add(rs.Column("id").IntegerValue)
+		        titles.Add(rs.Column("title").StringValue)
+		        texts.Add(rs.Column("chunk_text").StringValue)
+		        sources.Add(rs.Column("source").StringValue)
+		        chunkIndexes.Add(rs.Column("chunk_index").IntegerValue)
+		        prevIDs.Add(rs.Column("prev_id").IntegerValue)
+		        nextIDs.Add(rs.Column("next_id").IntegerValue)
+		        scores.Add(CosineSimilarity(queryEmb, embBlob))
+		      End If
+		      rs.MoveToNextRow
+		    Loop
+		    rs.Close
+
+		    Var ftsScores() As Double
+		    For i As Integer = 0 To chunkIDs.LastIndex
+		      ftsScores.Add(0.0)
+		    Next i
+
+		    Var ftsSafe As String = BuildMatchQuery(query)
+		    Try
+		      Var ftsRS As RowSet
+		      If ftsSafe <> "" Then ftsRS = mDB.SelectSQL( _
+		        "SELECT rowid, bm25(chunks_fts) AS bm25_score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT 200", _
+		        ftsSafe)
+		      If ftsRS <> Nil Then
+		        Var ftsMap As New Dictionary
+		        Do Until ftsRS.AfterLastRow
+		          Var rid As Integer = ftsRS.Column("rowid").IntegerValue
+		          Var bm25 As Double = ftsRS.Column("bm25_score").DoubleValue
+		          Var normScore As Double = 1.0 / (1.0 + Exp(bm25 * 0.5))
+		          ftsMap.Value(rid) = normScore
+		          ftsRS.MoveToNextRow
+		        Loop
+		        ftsRS.Close
+		        For i As Integer = 0 To chunkIDs.LastIndex
+		          If ftsMap.HasKey(chunkIDs(i)) Then
+		            ftsScores(i) = ftsMap.Value(chunkIDs(i)).DoubleValue
+		          End If
+		        Next i
+		      End If
+		    Catch
+		      // FTS not available (old DB without chunks_fts) — vector-only mode.
+		    End Try
+
+		    Var queryLowerForBoost As String = query.Lowercase
+		    Var overviewIdx As Integer = -1
+		    For i As Integer = 0 To scores.LastIndex
+		      Var score As Double = scores(i) * 0.7 + ftsScores(i) * 0.3
+		      Var className As String = ExtractClassName(titles(i), texts(i))
+		      If className <> "" And QueryNamesClass(queryLowerForBoost, className.Lowercase) Then
+		        score = score + kClassNameBoost
+		        If overviewIdx < 0 And titles(i) = className + " > Overview" Then overviewIdx = i
+		      End If
+		      combinedScores.Add(score)
+		    Next i
+
+		    Var candidateCount As Integer = maxResults * 2
+		    If combinedScores.Count < candidateCount Then candidateCount = combinedScores.Count
+		    Var used() As Boolean
+		    For i As Integer = 0 To combinedScores.LastIndex
+		      used.Add(False)
+		    Next i
+
+		    Var topIdxs() As Integer
+		    For r As Integer = 0 To candidateCount - 1
+		      Var bestIdx As Integer = -1
+		      Var bestScore As Double = -2.0
+		      For i As Integer = 0 To combinedScores.LastIndex
+		        If Not used(i) And combinedScores(i) > bestScore Then
+		          bestScore = combinedScores(i)
+		          bestIdx = i
 		        End If
 		      Next i
-		    End If
-		  Catch
-		    // FTS not available (old DB without chunks_fts) — vector-only mode.
-		  End Try
+		      If bestIdx < 0 Then Exit
+		      used(bestIdx) = True
+		      topIdxs.Add(bestIdx)
+		    Next r
 
-		  // Combine: 70% vector + 30% FTS, plus a flat boost when the query names
-		  // this chunk's class exactly. Ported from XDOX Retrieval.HybridSearchChunks
-		  // — cosine similarity alone can't reliably separate e.g.
-		  // "DesktopWKWebViewControlMBS" from "DesktopWebView2ControlMBS" (both
-		  // score ~0.75 against a query naming the former), so an explicit
-		  // substring match on a named class overrides a close cosine race.
-		  //
-		  // While scoring: also note which chunk (if any) IS the matched class's
-		  // own "ClassName > Overview" page — overviewIdx, guaranteed into the
-		  // results below rather than left to compete on score. Ported from XDOX
-		  // Retrieval.HybridSearchChunks: kClassNameBoost applies identically to
-		  // EVERY chunk of a matched class, so it gives a class's own Overview
-		  // chunk no relative edge over that same class's specific member
-		  // chunks — confirmed live on the XDOX side that a flat Overview-only
-		  // boost on top of kClassNameBoost was still insufficient (per-chunk
-		  // score spread is too wide to safely tune a constant to), so
-		  // deterministic inclusion (same pattern as PinnedMigrationResults) is
-		  // used instead of trying to out-tune the score race.
-		  Var queryLowerForBoost As String = query.Lowercase
-		  Var combinedScores() As Double
-		  Var overviewIdx As Integer = -1
-		  For i As Integer = 0 To scores.LastIndex
-		    Var score As Double = scores(i) * 0.7 + ftsScores(i) * 0.3
-		    Var className As String = ExtractClassName(titles(i), texts(i))
-		    If className <> "" And QueryNamesClass(queryLowerForBoost, className.Lowercase) Then
-		      score = score + kClassNameBoost
-		      If overviewIdx < 0 And titles(i) = className + " > Overview" Then overviewIdx = i
-		    End If
-		    combinedScores.Add(score)
-		  Next i
+		    Var includedIDsLegacy As New Dictionary
+		    Var sourceLastScore As New Dictionary
+		    Var kDedupeScoreDelta As Double = 0.04
 
-		  // --- Partial selection sort for top maxResults*2 candidates (to allow dedup) ---
-		  Var candidateCount As Integer = maxResults * 2
-		  If combinedScores.Count < candidateCount Then candidateCount = combinedScores.Count
-		  Var used() As Boolean
-		  For i As Integer = 0 To combinedScores.LastIndex
-		    used.Add(False)
-		  Next i
-
-		  Var topIdxs() As Integer
-		  For r As Integer = 0 To candidateCount - 1
-		    Var bestIdx As Integer = -1
-		    Var bestScore As Double = -2.0
-		    For i As Integer = 0 To combinedScores.LastIndex
-		      If Not used(i) And combinedScores(i) > bestScore Then
-		        bestScore = combinedScores(i)
-		        bestIdx = i
+		    For Each idx As Integer In topIdxs
+		      If finalIdxs.Count >= maxResults Then Exit
+		      Var src As String = sources(idx)
+		      Var sc As Double = combinedScores(idx)
+		      If sourceLastScore.HasKey(src) Then
+		        Var prevScore As Double = sourceLastScore.Value(src).DoubleValue
+		        If Abs(sc - prevScore) < kDedupeScoreDelta Then Continue
 		      End If
-		    Next i
-		    If bestIdx < 0 Then Exit
-		    used(bestIdx) = True
-		    topIdxs.Add(bestIdx)
-		  Next r
+		      sourceLastScore.Value(src) = sc
+		      includedIDsLegacy.Value(chunkIDs(idx)) = True
+		      finalIdxs.Add(idx)
+		    Next
 
-		  // --- Deduplication (#4): skip chunks from same source with near-identical score ---
-		  // Also tracks which chunk IDs are included so neighbour expansion doesn't re-add them.
-		  Var includedIDs As New Dictionary
-		  Var sourceLastScore As New Dictionary
-		  Var kDedupeScoreDelta As Double = 0.04
-
-		  Var finalIdxs() As Integer
-		  For Each idx As Integer In topIdxs
-		    If finalIdxs.Count >= maxResults Then Exit
-		    Var src As String = sources(idx)
-		    Var sc As Double = combinedScores(idx)
-		    If sourceLastScore.HasKey(src) Then
-		      // NOT CDbl(Variant) — see the ftsMap fixes above for why.
-		      Var prevScore As Double = sourceLastScore.Value(src).DoubleValue
-		      // Keep the chunk only if it adds meaningfully different content from the same source.
-		      If Abs(sc - prevScore) < kDedupeScoreDelta Then Continue
+		    If overviewIdx >= 0 And Not includedIDsLegacy.HasKey(chunkIDs(overviewIdx)) Then
+		      If finalIdxs.Count < maxResults Then
+		        finalIdxs.Add(overviewIdx)
+		      Else
+		        Var weakestPos As Integer = 0
+		        For p As Integer = 1 To finalIdxs.LastIndex
+		          If combinedScores(finalIdxs(p)) < combinedScores(finalIdxs(weakestPos)) Then weakestPos = p
+		        Next
+		        finalIdxs(weakestPos) = overviewIdx
+		      End If
+		      includedIDsLegacy.Value(chunkIDs(overviewIdx)) = True
 		    End If
-		    sourceLastScore.Value(src) = sc
-		    includedIDs.Value(chunkIDs(idx)) = True
-		    finalIdxs.Add(idx)
-		  Next
-
-		  // Guarantee the matched class's own Overview chunk survives into
-		  // finalIdxs even if it lost the score race above — see the comment on
-		  // overviewIdx. If it's not already in (the common case — that's the
-		  // bug this exists to fix), bump the weakest current slot rather than
-		  // growing past maxResults. Ported from XDOX Retrieval.HybridSearchChunks.
-		  If overviewIdx >= 0 And Not includedIDs.HasKey(chunkIDs(overviewIdx)) Then
-		    If finalIdxs.Count < maxResults Then
-		      finalIdxs.Add(overviewIdx)
-		    Else
-		      Var weakestPos As Integer = 0
-		      For p As Integer = 1 To finalIdxs.LastIndex
-		        If combinedScores(finalIdxs(p)) < combinedScores(finalIdxs(weakestPos)) Then weakestPos = p
-		      Next
-		      finalIdxs(weakestPos) = overviewIdx
-		    End If
-		    includedIDs.Value(chunkIDs(overviewIdx)) = True
+		    If overviewIdx >= 0 Then guaranteedChunkIDs.Value(chunkIDs(overviewIdx)) = True
 		  End If
+
+		  If chunkIDs.Count = 0 Or finalIdxs.Count = 0 Then Return ""
+
+		  Var includedIDs As New Dictionary
+		  For Each idx As Integer In finalIdxs
+		    includedIDs.Value(chunkIDs(idx)) = True
+		  Next
 
 		  // --- Reranking: ported from XDOX Retrieval.HybridSearchChunks ---
 		  // A cross-encoder pass over the already-selected candidates that
@@ -905,13 +935,23 @@ Protected Class SemanticSearch
 		  // fixed. Pure fallback if the reranker is down or was never
 		  // installed (XDOX owns its lifecycle, not XMCP): finalIdxs keeps its
 		  // existing cosine+BM25 order and bestRerankScore stays -1 (no line
-		  // added to the header).
+		  // added to the header). Per-chunk-ID rerank score is also tracked
+		  // (rerankScoreByChunkID) — Task 7's kMinRelevanceScore filtering
+		  // below needs to know whether a SPECIFIC chunk cleared the bar, not
+		  // just the batch's best score.
+		  //
+		  // Same platform-labeling-before-reranking fix as XDOX: label text
+		  // is applied to the candidate BEFORE it's sent to the reranker, not
+		  // only when rendering the final output — otherwise the cross-
+		  // encoder never sees the platform-mismatch signal it needs to
+		  // correctly downrank a wrong-platform chunk.
 		  Var bestRerankScore As Double = -1.0
+		  Var rerankScoreByChunkID As New Dictionary
 		  EnsureRerankAvailable
 		  If mRerankAvailable And finalIdxs.Count > 0 Then
 		    Var candidateTexts() As String
 		    For Each idx As Integer In finalIdxs
-		      candidateTexts.Add(texts(idx))
+		      candidateTexts.Add(TargetPlatformLabel(titles(idx)) + texts(idx))
 		    Next
 		    Var rerankScores() As Double = FetchRerankScores(query, candidateTexts)
 		    If rerankScores.Count = 0 Then
@@ -941,6 +981,7 @@ Protected Class SemanticSearch
 		      Var bestScore As Double = -2.0
 		      For Each pos As Integer In order
 		        rerankedIdxs.Add(finalIdxs(pos))
+		        rerankScoreByChunkID.Value(chunkIDs(finalIdxs(pos))) = rerankScores(pos)
 		        If rerankScores(pos) > bestScore Then bestScore = rerankScores(pos)
 		      Next
 		      finalIdxs = rerankedIdxs
@@ -1027,9 +1068,30 @@ Protected Class SemanticSearch
 		    srcMap.Value(chunkIndexes(idx)) = idx
 		  Next
 
-		  // Render results
-		  Var results() As String
+		  // Render results, one entry per chunk in score/finalIdxs order
+		  // followed by its neighbours (grouped by source, sorted by
+		  // chunk_index) — same shape as before, but now also tagged
+		  // native/third-party so the header below can report both counts
+		  // and the two blocks can be labeled.
+		  Var nativeEntries() As String
+		  Var mbsEntries() As String
 		  Var anyPlatformLabel As Boolean = False
+		  // Ported from XDOX Retrieval.BuildContext: a result is dropped here
+		  // (rendered into neither block) if its OWN rerank score is below
+		  // kMinRelevanceScore — ScopedSearch always fills its half of the
+		  // result budget with whatever scored best in its pool, even when
+		  // the best available is still noise (e.g. a generic tutorial chunk
+		  // for a question with no real native answer). RerankScore
+		  // unavailable (reranker down, or this chunk never got scored) is
+		  // NOT filtered — only a chunk that WAS scored and scored low is
+		  // dropped. A chunk force-included via the Overview guarantee
+		  // (guaranteedChunkIDs) is exempt, same reasoning as XDOX's
+		  // RetrievalResult.IsGuaranteed: it was deliberately pinned past the
+		  // score race specifically so the model/caller can confirm a
+		  // matched class exists, and a low rerank score must not undo that.
+		  Var wantsNonDesktop As Boolean = QueryNamesNonDesktopPlatform(query)
+		  Var nativeFoundCount As Integer = 0
+
 		  For Each src As String In sourceOrder
 		    If Not sourceChunks.HasKey(src) Then Continue
 		    Var srcMap As Dictionary = sourceChunks.Value(src)
@@ -1051,15 +1113,39 @@ Protected Class SemanticSearch
 
 		    For Each cidx As Integer In idxKeys
 		      Var ai As Integer = srcMap.Value(cidx)
+		      Var cid As Integer = chunkIDs(ai)
+		      Var isGuaranteed As Boolean = guaranteedChunkIDs.HasKey(cid)
+		      Var hasRerankScore As Boolean = rerankScoreByChunkID.HasKey(cid)
+		      If Not isGuaranteed And hasRerankScore Then
+		        If rerankScoreByChunkID.Value(cid).DoubleValue < kMinRelevanceScore Then Continue
+		      End If
+
 		      Var platformLabel As String = TargetPlatformLabel(titles(ai))
 		      If platformLabel <> "" Then anyPlatformLabel = True
-		      results.Add("--- " + titles(ai) + " ---" + EndOfLine + platformLabel + texts(ai))
+		      Var entry As String = "--- " + titles(ai) + " ---" + EndOfLine + platformLabel + texts(ai)
+
+		      Var isThirdParty As Boolean = sources(ai).Left(13) = "MBS Docset > "
+		      If isThirdParty Then
+		        mbsEntries.Add(entry)
+		      Else
+		        nativeEntries.Add(entry)
+		        // Ported from XDOX Retrieval.BuildContext: a native result
+		        // tagged for a non-cross-platform target (Web/iOS/Console/
+		        // Android) does NOT count toward "native was found" unless
+		        // the user's own query names that platform — otherwise a
+		        // genuinely-relevant-but-wrong-platform chunk (e.g. WebPage
+		        // for "show a webpage in a desktop app") would silently
+		        // satisfy "native exists" and suppress the all-third-party
+		        // note even though no desktop-native answer was found.
+		        If wantsNonDesktop Or platformLabel = "" Then nativeFoundCount = nativeFoundCount + 1
+		      End If
 		    Next
 		  Next
 
-		  If results.Count = 0 Then Return ""
+		  If nativeEntries.Count = 0 And mbsEntries.Count = 0 Then Return ""
 
-		  Var header As String = "Found " + results.Count.ToString + " result(s) for """ + query + """ (semantic"
+		  Var totalCount As Integer = nativeEntries.Count + mbsEntries.Count
+		  Var header As String = "Found " + totalCount.ToString + " result(s) for """ + query + """ (semantic"
 		  Var headerVersion As String = If(activeVersion <> "", activeVersion, mDocsVersion)
 		  If headerVersion <> "" Then header = header + ", " + headerVersion
 		  header = header + "):"
@@ -1089,8 +1175,44 @@ Protected Class SemanticSearch
 		      + "platform — do not treat a result for one platform (e.g. Web-target) as confirming the same " _
 		      + "feature exists on a different platform (e.g. Desktop) the caller may actually be asking about."
 		  End If
+
+		  // Ported from XDOX Retrieval.BuildContext/AllThirdPartyNote/
+		  // BothSourcesNote (Task 6/Task 7). Unlike XDOX, which strips a
+		  // short marker out of the context and appends the real instruction
+		  // text after its system prompt's ClosingReminders (small local
+		  // models were confirmed to ignore an instruction placed BEFORE a
+		  // large context block), XMCP has no system prompt of its own to
+		  // carry an instruction — its output goes straight into an external
+		  // caller's context, so the note has to travel in the header text
+		  // itself, same as the platform-label note above. There is no
+		  // equivalent "burger test" placement fix available here: the
+		  // header IS the only place this note can go.
+		  If nativeFoundCount = 0 And mbsEntries.Count > 0 Then
+		    header = header + EndOfLine + "IMPORTANT: every result below is THIRD-PARTY (MBS plugin) documentation " _
+		      + "— none of these results are part of Xojo itself. This search did not find a native (built-in) " _
+		      + "way to do this, but that does NOT mean one doesn't exist; it may simply not have been named in " _
+		      + "the query. Do not conclude 'Xojo has no native way' from this result alone — say a native " _
+		      + "alternative could not be confirmed unless a specific native class is checked."
+		  ElseIf nativeFoundCount > 0 And mbsEntries.Count > 0 Then
+		    header = header + EndOfLine + "IMPORTANT: this result set contains BOTH a native Xojo (built-in) " _
+		      + "result AND a third-party (MBS plugin) result that both address the query — see the [Native Xojo " _
+		      + "Docs] and [Third-Party (MBS Plugin) Docs] sections below. Do not pick a winner between them: " _
+		      + "license situation, target platforms, and feature needs determine which is right, and only the " _
+		      + "caller/user knows those. Present both as real options — native first, then the MBS alternative " _
+		      + "— with a short, neutral tradeoff note, rather than leading with only one and mentioning the " _
+		      + "other as an afterthought."
+		  End If
+
+		  Var bodySections() As String
+		  If nativeEntries.Count > 0 Then
+		    bodySections.Add("[Native Xojo Docs]" + EndOfLine + String.FromArray(nativeEntries, EndOfLine + "---" + EndOfLine + EndOfLine))
+		  End If
+		  If mbsEntries.Count > 0 Then
+		    bodySections.Add("[Third-Party (MBS Plugin) Docs]" + EndOfLine + String.FromArray(mbsEntries, EndOfLine + "---" + EndOfLine + EndOfLine))
+		  End If
+
 		  Var output As String = header + _
-		    EndOfLine + EndOfLine + String.FromArray(results, EndOfLine + EndOfLine)
+		    EndOfLine + EndOfLine + String.FromArray(bodySections, EndOfLine + EndOfLine)
 
 		  // Store in cache (#13)
 		  If mCache = Nil Then mCache = New Dictionary
@@ -1103,6 +1225,225 @@ Protected Class SemanticSearch
 		  Return output
 
 		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub ScopedSearch(query As String, queryEmb As MemoryBlock, maxResults As Integer, activeVersion As String, mbsOnly As Boolean, ByRef result As ScopedSearchResult)
+		  // Ported from XDOX Retrieval.ScopedSearch. One source's worth of the
+		  // old single-pool Search(): cosine + BM25 scan, class-name boost,
+		  // Overview-chunk guarantee, dedup — scoped to EITHER native docs
+		  // (docs_version <> MBS, includes '' version-independent chunks) OR
+		  // MBS docs alone, never both. Called twice by Search() (and a
+		  // possible third "spare capacity" re-call for whichever side comes
+		  // up short) so native and MBS chunks compete only within their own
+		  // pool, never against each other. maxResults=0 is valid (the other
+		  // side used up the whole budget) and short-circuits to an empty
+		  // result without touching the DB. Keep in sync with XDOX
+		  // Retrieval.ScopedSearch.
+		  If maxResults <= 0 Then Return
+
+		  Var chunkIDs() As Integer
+		  Var titles() As String
+		  Var texts() As String
+		  Var sources() As String
+		  Var chunkIndexes() As Integer
+		  Var prevIDs() As Integer
+		  Var nextIDs() As Integer
+		  Var cosScores() As Double
+
+		  Try
+		    Var sql As String
+		    If mbsOnly Then
+		      sql = "SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE c.docs_version = ?"
+		    Else
+		      sql = "SELECT c.id, c.title, c.chunk_text, c.source, c.chunk_index, c.prev_id, c.next_id, e.embedding FROM embeddings e JOIN chunks c ON e.chunk_id = c.id WHERE (c.docs_version = ? OR c.docs_version = '') AND c.docs_version <> ?"
+		    End If
+		    Var rs As RowSet
+		    If mbsOnly Then
+		      rs = mDB.SelectSQL(sql, kMBSDocsVersion)
+		    Else
+		      rs = mDB.SelectSQL(sql, activeVersion, kMBSDocsVersion)
+		    End If
+		    Do Until rs.AfterLastRow
+		      Var embBlob As MemoryBlock = rs.Column("embedding").BlobValue
+		      If embBlob <> Nil And embBlob.Size > 0 Then
+		        chunkIDs.Add(rs.Column("id").IntegerValue)
+		        titles.Add(rs.Column("title").StringValue)
+		        texts.Add(rs.Column("chunk_text").StringValue)
+		        sources.Add(rs.Column("source").StringValue)
+		        chunkIndexes.Add(rs.Column("chunk_index").IntegerValue)
+		        prevIDs.Add(rs.Column("prev_id").IntegerValue)
+		        nextIDs.Add(rs.Column("next_id").IntegerValue)
+		        cosScores.Add(CosineSimilarity(queryEmb, embBlob))
+		      End If
+		      rs.MoveToNextRow
+		    Loop
+		    rs.Close
+		  Catch e As DatabaseException
+		    Return
+		  End Try
+		  If chunkIDs.Count = 0 Then Return
+
+		  // BM25 leg, scoped the same way via an added docs_version filter —
+		  // bm25() is negative-is-better; normalise via 1/(1+e^(0.5x)).
+		  Var ftsScores() As Double
+		  For i As Integer = 0 To chunkIDs.LastIndex
+		    ftsScores.Add(0.0)
+		  Next i
+		  Var safe As String = BuildMatchQuery(query)
+		  If safe <> "" Then
+		    Try
+		      Var ftsMap As New Dictionary
+		      // ORDER BY the raw bm25() score (ascending) BEFORE the LIMIT is
+		      // load-bearing, not cosmetic — an unordered LIMIT can silently
+		      // drop the true best matches. Join against chunks here (not
+		      // just chunks_fts) so the docs_version scope applies to the
+		      // FTS leg too — otherwise an MBS-only scan's BM25 leg would
+		      // still score native chunks.
+		      Var ftsSQL As String
+		      If mbsOnly Then
+		        ftsSQL = "SELECT chunks_fts.rowid AS rid, bm25(chunks_fts) AS bm25_score FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid WHERE chunks_fts MATCH ? AND c.docs_version = ? ORDER BY bm25(chunks_fts) LIMIT 200"
+		      Else
+		        ftsSQL = "SELECT chunks_fts.rowid AS rid, bm25(chunks_fts) AS bm25_score FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid WHERE chunks_fts MATCH ? AND (c.docs_version = ? OR c.docs_version = '') AND c.docs_version <> ? ORDER BY bm25(chunks_fts) LIMIT 200"
+		      End If
+		      Var ftsRS As RowSet
+		      If mbsOnly Then
+		        ftsRS = mDB.SelectSQL(ftsSQL, safe, kMBSDocsVersion)
+		      Else
+		        ftsRS = mDB.SelectSQL(ftsSQL, safe, activeVersion, kMBSDocsVersion)
+		      End If
+		      Do Until ftsRS.AfterLastRow
+		        Var norm As Double = 1.0 / (1.0 + Exp(ftsRS.Column("bm25_score").DoubleValue * 0.5))
+		        ftsMap.Value(ftsRS.Column("rid").IntegerValue) = norm
+		        ftsRS.MoveToNextRow
+		      Loop
+		      ftsRS.Close
+		      // NOT CDbl(Variant) — see the ftsMap fixes elsewhere in this
+		      // file for why. DoubleValue reads the Variant's binary double
+		      // directly, no string round-trip.
+		      For i As Integer = 0 To chunkIDs.LastIndex
+		        If ftsMap.HasKey(chunkIDs(i)) Then ftsScores(i) = ftsMap.Value(chunkIDs(i)).DoubleValue
+		      Next i
+		    Catch e As DatabaseException
+		      // FTS query failed — vector-only scores.
+		    End Try
+		  End If
+
+		  // Combined: 70% vector + 30% FTS, plus a flat boost when the query
+		  // names this chunk's class exactly, and tracking of this pool's
+		  // own Overview-chunk guarantee.
+		  Var queryLower As String = query.Lowercase
+		  Var combined() As Double
+		  Var overviewIdx As Integer = -1
+		  For i As Integer = 0 To cosScores.LastIndex
+		    Var score As Double = cosScores(i) * 0.7 + ftsScores(i) * 0.3
+		    Var className As String = ExtractClassName(titles(i), texts(i))
+		    If className <> "" And QueryNamesClass(queryLower, className.Lowercase) Then
+		      score = score + kClassNameBoost
+		      If overviewIdx < 0 And titles(i) = className + " > Overview" Then overviewIdx = i
+		    End If
+		    combined.Add(score)
+		  Next i
+
+		  // Partial selection sort for the top maxResults*2 candidates.
+		  Var candidateCount As Integer = maxResults * 2
+		  If combined.Count < candidateCount Then candidateCount = combined.Count
+		  Var used() As Boolean
+		  For i As Integer = 0 To combined.LastIndex
+		    used.Add(False)
+		  Next i
+		  Var topIdxs() As Integer
+		  For r As Integer = 0 To candidateCount - 1
+		    Var bestIdx As Integer = -1
+		    Var bestScore As Double = -2.0
+		    For i As Integer = 0 To combined.LastIndex
+		      If Not used(i) And combined(i) > bestScore Then
+		        bestScore = combined(i)
+		        bestIdx = i
+		      End If
+		    Next i
+		    If bestIdx < 0 Then Exit
+		    used(bestIdx) = True
+		    topIdxs.Add(bestIdx)
+		  Next r
+
+		  // Dedup: skip same-source chunks with near-identical scores.
+		  Var includedIDs As New Dictionary
+		  Var sourceLastScore As New Dictionary
+		  Var finalIdxs() As Integer
+		  Var kDedupeScoreDelta As Double = 0.04
+		  For Each idx As Integer In topIdxs
+		    If finalIdxs.Count >= maxResults Then Exit
+		    Var src As String = sources(idx)
+		    Var sc As Double = combined(idx)
+		    If sourceLastScore.HasKey(src) Then
+		      If Abs(sc - sourceLastScore.Value(src).DoubleValue) < kDedupeScoreDelta Then Continue
+		    End If
+		    sourceLastScore.Value(src) = sc
+		    includedIDs.Value(chunkIDs(idx)) = True
+		    finalIdxs.Add(idx)
+		  Next
+
+		  // Guarantee this pool's matched class's own Overview chunk survives
+		  // into finalIdxs even if it lost the score race above — see the
+		  // comment on overviewIdx. Bump the weakest current slot rather than
+		  // growing past maxResults, so a single pool can't blow the
+		  // per-pool share of the token budget.
+		  If overviewIdx >= 0 And Not includedIDs.HasKey(chunkIDs(overviewIdx)) Then
+		    If finalIdxs.Count < maxResults Then
+		      finalIdxs.Add(overviewIdx)
+		    Else
+		      Var weakestPos As Integer = 0
+		      For p As Integer = 1 To finalIdxs.LastIndex
+		        If combined(finalIdxs(p)) < combined(finalIdxs(weakestPos)) Then weakestPos = p
+		      Next
+		      finalIdxs(weakestPos) = overviewIdx
+		    End If
+		    includedIDs.Value(chunkIDs(overviewIdx)) = True
+		  End If
+
+		  // Track by chunk ID (not local array index) — MergeScopedResult
+		  // remaps indexes when combining native+MBS into one array, so an
+		  // index captured here wouldn't survive the merge.
+		  If overviewIdx >= 0 Then result.OverviewChunkID = chunkIDs(overviewIdx)
+
+		  result.ChunkIDs = chunkIDs
+		  result.Titles = titles
+		  result.Texts = texts
+		  result.Sources = sources
+		  result.ChunkIndexes = chunkIndexes
+		  result.PrevIDs = prevIDs
+		  result.NextIDs = nextIDs
+		  result.CosScores = cosScores
+		  result.Combined = combined
+		  result.FinalIdxs = finalIdxs
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub MergeScopedResult(part As ScopedSearchResult, ByRef chunkIDs() As Integer, ByRef titles() As String, ByRef texts() As String, ByRef sources() As String, ByRef chunkIndexes() As Integer, ByRef prevIDs() As Integer, ByRef nextIDs() As Integer, ByRef combined() As Double, ByRef cosScores() As Double, ByRef finalIdxs() As Integer)
+		  // Ported from XDOX Retrieval.MergeScopedResult. Appends one
+		  // ScopedSearch pool's finalIdxs onto the shared, merged arrays
+		  // Search() reranks/expands/groups over — remapping each local
+		  // index to its new position in the merged arrays. Call native's
+		  // pool first, then MBS's, so finalIdxs naturally ends up
+		  // native-first.
+		  Var offset As Integer = chunkIDs.Count
+		  For i As Integer = 0 To part.ChunkIDs.LastIndex
+		    chunkIDs.Add(part.ChunkIDs(i))
+		    titles.Add(part.Titles(i))
+		    texts.Add(part.Texts(i))
+		    sources.Add(part.Sources(i))
+		    chunkIndexes.Add(part.ChunkIndexes(i))
+		    prevIDs.Add(part.PrevIDs(i))
+		    nextIDs.Add(part.NextIDs(i))
+		    combined.Add(part.Combined(i))
+		    cosScores.Add(part.CosScores(i))
+		  Next i
+		  For Each localIdx As Integer In part.FinalIdxs
+		    finalIdxs.Add(offset + localIdx)
+		  Next
+		End Sub
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
@@ -1422,6 +1763,16 @@ Protected Class SemanticSearch
 
 	// Flat score boost when the query names a chunk's class exactly (matches XDOX).
 	#tag Constant, Name = kClassNameBoost, Type = Double, Dynamic = False, Default = \"0.15", Scope = Private
+	#tag EndConstant
+
+	// Distinct from the 0.9 reranker-confidence threshold in the header note
+	// above (that's "is the search's BEST result good enough to answer at
+	// all"). This is "is THIS SPECIFIC chunk relevant enough to show as one
+	// of the two native/MBS sources" — a much lower bar, since a chunk can
+	// legitimately be a weak-but-real supporting result. Matches XDOX
+	// Retrieval.kMinRelevanceScore — see that constant's comment for how the
+	// value was chosen (not independently re-validated on the XMCP side).
+	#tag Constant, Name = kMinRelevanceScore, Type = Double, Dynamic = False, Default = \"0.3", Scope = Private
 	#tag EndConstant
 
 	#tag Constant, Name = kWidenedChunkLimit, Type = Double, Dynamic = False, Default = \"7", Scope = Private
