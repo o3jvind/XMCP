@@ -7,7 +7,14 @@ Protected Module MCPKit
 		  
 		  Var errorResponse As New JSONItem
 		  errorResponse.Value("jsonrpc") = "2.0"
-		  errorResponse.Value("id") = If(id.Type = Variant.TypeNil, Nil, id)
+		  // A notification or a parse failure may not have a request id. Calling
+		  // `.Type` on a Nil Variant raises NilObjectException in Xojo, which
+		  // terminates the stdio MCP server before the client can discover tools.
+		  If id = Nil Then
+		    errorResponse.Value("id") = Nil
+		  Else
+		    errorResponse.Value("id") = id
+		  End If
 		  
 		  Var error As New JSONItem
 		  error.Value("code") = Integer(errorType)

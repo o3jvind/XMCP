@@ -67,19 +67,29 @@ Inherits MCPKit.ServerApplication
 
 		  // The DB alone enables keyword (BM25) search; a running embedding server
 		  // (XDOX manages one on port 8089) upgrades it to hybrid semantic search.
-		  // Both are re-checked at search time — startup order no longer matters.
-		  SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", ragDB.NativePath)
-		  If Verbose Then
-		    If SemanticSearch.HasDatabase Then
-		      System.DebugLog("RAG database: " + ragDB.NativePath)
-		      If SemanticSearch.Available Then
-		        System.DebugLog("Semantic search enabled (hybrid).")
-		      Else
-		        System.DebugLog("Embedding server not reachable — keyword (BM25) search only.")
+		  // Search is optional: a missing/unreadable RAG database must never prevent
+		  // the stdio MCP server from completing its handshake and exposing IDE tools.
+		  If ragDB <> Nil Then
+		    Try
+		      SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", ragDB.NativePath)
+		      If Verbose Then
+		        If SemanticSearch.HasDatabase Then
+		          System.DebugLog("RAG database: " + ragDB.NativePath)
+		          If SemanticSearch.Available Then
+		            System.DebugLog("Semantic search enabled (hybrid).")
+		          Else
+		            System.DebugLog("Embedding server not reachable — keyword (BM25) search only.")
+		          End If
+		        Else
+		          System.DebugLog("No RAG database yet at " + ragDB.NativePath + " — falling back to plain text scan meanwhile.")
+		        End If
 		      End If
-		    Else
-		      System.DebugLog("No RAG database yet at " + ragDB.NativePath + " — will re-check at search time; falling back to plain text scan meanwhile.")
-		    End If
+		    Catch e As RuntimeException
+		      SemanticSearch = Nil
+		      System.DebugLog("WARNING: RAG search disabled during startup: " + e.Message)
+		    End Try
+		  Else
+		    System.DebugLog("WARNING: RAG search disabled because no database path is available.")
 		  End If
 
 		  // Register all MCP tools.
