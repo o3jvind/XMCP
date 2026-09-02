@@ -71,19 +71,27 @@ Inherits MCPKit.ServerApplication
 		  // result ordering on top of that — independently degradable, same as
 		  // the embedding tier. All three are re-checked at search time —
 		  // startup order no longer matters.
-		  SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", "http://localhost:8093/v1/rerank", ragDB.NativePath)
-		  If Verbose Then
-		    If SemanticSearch.HasDatabase Then
-		      System.DebugLog("RAG database: " + ragDB.NativePath)
-		      If SemanticSearch.Available Then
-		        System.DebugLog("Semantic search enabled (hybrid)" + If(SemanticSearch.RerankAvailable, " with reranking.", " — reranker not reachable, cosine+BM25 ordering only."))
+		  // Search is optional: a construction failure (e.g. an unreadable or
+		  // corrupt DB file) must never prevent the stdio MCP server from
+		  // completing its handshake and exposing IDE tools.
+		  Try
+		    SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", "http://localhost:8093/v1/rerank", ragDB.NativePath)
+		    If Verbose Then
+		      If SemanticSearch.HasDatabase Then
+		        System.DebugLog("RAG database: " + ragDB.NativePath)
+		        If SemanticSearch.Available Then
+		          System.DebugLog("Semantic search enabled (hybrid)" + If(SemanticSearch.RerankAvailable, " with reranking.", " — reranker not reachable, cosine+BM25 ordering only."))
+		        Else
+		          System.DebugLog("Embedding server not reachable — keyword (BM25) search only.")
+		        End If
 		      Else
-		        System.DebugLog("Embedding server not reachable — keyword (BM25) search only.")
+		        System.DebugLog("No RAG database yet at " + ragDB.NativePath + " — will re-check at search time; falling back to plain text scan meanwhile.")
 		      End If
-		    Else
-		      System.DebugLog("No RAG database yet at " + ragDB.NativePath + " — will re-check at search time; falling back to plain text scan meanwhile.")
 		    End If
-		  End If
+		  Catch e As RuntimeException
+		    SemanticSearch = Nil
+		    System.DebugLog("WARNING: RAG search disabled during startup: " + e.Message)
+		  End Try
 
 		  // Register all MCP tools.
 		  RegisterTools( _
