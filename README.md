@@ -44,6 +44,15 @@ XMCP also ships a `usage-guide.md` file next to the binary, exposed as an MCP re
 }
 ```
 
+**OpenAI Codex CLI** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.xmcp]
+command = "/path/to/XMCP"
+```
+
+Any other MCP-capable client works the same way — XMCP speaks standard MCP over stdin/stdout, so point the client at the binary as its server command.
+
 To specify a custom documentation path:
 
 ```json
@@ -69,7 +78,7 @@ XMCP [options]
 | `-v`, `--verbose` | Enable verbose debug logging to stderr |
 | `-d`, `--docs-path PATH` | Path to Xojo documentation directory (auto-detected if omitted) |
 
-The server communicates via JSON-RPC over stdin/stdout following the MCP protocol. It is not meant to be run interactively - it is launched by an MCP client (like Claude Code or Claude Desktop).
+The server communicates via JSON-RPC over stdin/stdout following the MCP protocol. It is not meant to be run interactively - it is launched by an MCP client (like Claude Code, Codex CLI, or Claude Desktop).
 
 You can start XMCP before the Xojo IDE. IDE-dependent tools will return an error until the IDE socket is available.
 XMCP retries both standard socket paths on each IDE request, so tools begin working automatically once the IDE starts.
@@ -233,7 +242,15 @@ These tools provide access to the local Xojo documentation, enabling the AI to l
 
 Searches the local Xojo documentation guides and tutorials. Returns matching sections with title and content. Use this for conceptual questions about language features, patterns, and best practices. To look up a specific class, method, or property by name, use `lookup_class` instead.
 
-When the XMCP-RAG embedding server is running and `xojo_rag.db` is present alongside the documentation, `search_docs` uses **hybrid search** (vector + FTS5 full-text) for higher-quality results. Otherwise it falls back to keyword search automatically — no configuration required.
+`search_docs` searches a RAG database and degrades gracefully through three tiers — no configuration required:
+
+1. **Semantic (hybrid)** — when the RAG database is found *and* the embedding server responds on `localhost:8089` (the [XDOX](https://github.com/o3jvind/XDOX) app manages one automatically while it runs).
+2. **Keyword (BM25)** — when only the database is available: FTS5 full-text search, still high quality.
+3. **Plain text scan** of `llms-full.txt` — last resort when no database exists.
+
+**Database discovery order:** `--db-path` (explicit) → `~/Library/Application Support/dk.o3jvind.xdox/xdox.db` (built and kept up to date by the XDOX app — the recommended setup) → `xojo_rag.db` next to the documentation (legacy XMCP-RAG-Indexer output).
+
+**Multiple Xojo versions:** when XDOX has indexed more than one Xojo version, `search_docs` returns results for the version XDOX currently has active (its status-bar version picker), plus version-independent chunks — the active version is read fresh on every search, so switching it in XDOX takes effect immediately with no restart. Result headers name that version. Legacy databases without per-version data are unaffected.
 
 **Hybrid search pipeline:**
 1. Embeds the query with the local embedding model
@@ -249,6 +266,17 @@ When the XMCP-RAG embedding server is running and `xojo_rag.db` is present along
 | `query` | String | Yes | The search term (e.g. `JSONItem`, `FolderItem`, `database`). |
 | `max_results` | Integer | No | Maximum number of matching sections to return. Default: 5. |
 | `context_lines` | Integer | No | Number of lines of context before and after each match (keyword search only). Default: 10. |
+
+#### `search_notes`
+
+Searches the user's personal Xojo notes, written and curated in the [XDOX](https://github.com/o3jvind/XDOX) app. Notes capture the user's own conventions, hard-won fixes and project-specific knowledge — a complement to the official docs. All notes are searched regardless of which Xojo version is active. Notes marked as version-specific in XDOX and written for an older version are flagged `[possibly outdated — written for Xojo <version>]`; notes marked global (version-independent) are never flagged.
+
+Requires the XDOX database (see discovery order above); against a legacy `xojo_rag.db` the tool responds gracefully that no notes database exists.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | String | Yes | The search term to look for in note titles and bodies. |
+| `max_results` | Integer | No | Maximum number of notes to return. Default: 5. |
 
 #### `lookup_class`
 

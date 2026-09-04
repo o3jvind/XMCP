@@ -2,6 +2,66 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.8.1] - 2026-08-14
+
+### Fixed
+- **Retrieval scoring kept in sync with XDOX's MBS docset support**: XDOX now
+  indexes the MBS Xojo Plugins documentation under its own `docs_version`
+  sentinel (`"mbs"`) instead of the version-independent `''`, so `SemanticSearch`'s
+  version filters (`KeywordSearch`, hybrid vector search) are updated to include
+  `docs_version = "mbs"` alongside the active Xojo version — without this, MBS
+  chunks would have silently dropped out of `search_docs`/`lookup_class` results
+  once XDOX's own filter changed. Also ported XDOX's class-name-exact-match score
+  boost (`ExtractClassName`): cosine similarity alone doesn't reliably separate
+  similarly-named MBS classes (e.g. `DesktopWKWebViewControlMBS` vs
+  `DesktopWebView2ControlMBS`) within the handful of results actually returned,
+  so a query naming a class exactly now gets a flat boost toward that class's
+  chunks. Both changes mirror XDOX's `Retrieval.xojo_code` — the scoring recipe
+  is deliberately duplicated on both sides.
+
+## [1.8.0] - 2026-07-09
+
+### Added
+- **Multiple Xojo versions**: XDOX (schema v3) can now index several Xojo doc versions side by side in one `xdox.db`, each chunk tagged with its `docs_version`. `search_docs` filters results to the version XDOX currently has active (`metadata.active_docs_version`, read fresh on every search so a live version switch in XDOX takes effect immediately) plus version-independent curated chunks (`docs_version = ''`). Result headers show the active version. This mirrors XDOX's `Retrieval` — the same filter is deliberately duplicated on both sides.
+
+### Changed
+- **Note relevance labelling**: notes now carry a `scope` (`all` = global/version-independent, or `version`). Only version-scoped notes can show the `[possibly outdated — written for …]` caveat; global notes never do. `search_notes` still searches **all** notes regardless of scope — nothing is filtered out, so Claude never silently misses a note.
+
+### Compatibility
+- Legacy databases (`xojo_rag.db`, or XDOX schema < 3 without the `docs_version`/`scope` columns) are detected at attach and the new filters are skipped — search behaves exactly as before against them.
+
+## [1.7.1] - 2026-07-06
+
+### Added
+- **Hybrid `search_notes`**: notes are now scored semantically (0.7·cosine + 0.3·BM25, relevance floor 0.45 — same recipe as XDOX's chat) whenever the embedding server answers, so natural-language queries find notes that share no keywords with the question. Falls back to the keyword tier unchanged.
+
+### Fixed
+- **Startup-order dependency**: the RAG database and the embedding server were probed exactly once, at process start. XMCP typically starts with the editor — *before* XDOX — and would then sit in the lowest search tier until restarted. Both are now re-checked lazily at search time (server probes are rate-limited to one per 30 s while down), so search upgrades itself the moment XDOX comes up. The XDOX database path is used even when the file doesn't exist yet, covering first launch and post-schema-bump reindexes.
+- `search_docs` drops back to the keyword tier immediately when the embedding server disappears mid-session (previously each search paid a failed HTTP round-trip).
+
+## [1.7.0] - 2026-07-06
+
+### Added
+- **`search_notes`**: searches the user's personal Xojo notes, written and curated in the [XDOX](https://github.com/o3jvind/XDOX) app. Notes flagged `[possibly outdated — written for Xojo <version>]` predate the currently indexed docs version. Responds gracefully against legacy databases without notes tables.
+- **`--db-path` option**: explicit RAG-database override. Default discovery order is now `--db-path` → `~/Library/Application Support/dk.o3jvind.xdox/xdox.db` (built and maintained by the XDOX app, which replaces XMCP-RAG-Indexer) → legacy `xojo_rag.db` next to the documentation.
+- **Keyword (BM25) search tier**: `search_docs` now degrades semantic → keyword → plain text scan. The keyword tier runs FTS5/BM25 against the RAG database and needs no embedding server, replacing the `llms-full.txt` substring scan as the primary fallback.
+- **Metadata validation**: `embedding_dim` ≠ 768 disables the semantic tier (keyword still works); the indexed `docs_version` is included in `search_docs`/`search_notes` result headers.
+
+### Changed
+- `SemanticSearch` keeps the database connection open when the embedding server is down (previously it discarded both), and the startup server probe fails fast (2 s + connection-error handler) instead of hanging up to 10 s.
+
+### Notes
+- The embedding server on port 8089 is managed automatically by the XDOX app while it runs. Semantic search is available whenever XDOX (or a manually started server) is up; keyword search works at all times.
+## [1.6.3] - 2026-06-22
+
+### Fixed
+- **CPU spin at idle**: `StdIn.ReadLine` does not block in Xojo's `ConsoleApplication` — it busy-spins when no data is available, causing ~100% CPU usage at idle. Replaced the `While True` / `ReadLine` loop with a `DoEvents(10)`-based loop that accumulates data from `StdIn.ReadAll` into a buffer and processes complete newline-terminated lines as they arrive. Idle CPU usage drops from ~100% to ~1%.
+
+## [1.6.2] - 2026-06-22
+
+### Changed
+- **`XOJO_IPCPATH` environment variable support**: XMCP now reads the `XOJO_IPCPATH` environment variable when locating the IDE's IPC socket, consistent with the Xojo IDE Scripting API documentation. If the variable contains a full path it is used directly; if it contains only a filename, `/tmp/` is prepended. Falls back to the standard `/tmp/XojoIDE` and `/private/tmp/XojoIDE` locations when the variable is not set.
+
 ## [1.6.1] - 2026-06-16
 
 ### Changed

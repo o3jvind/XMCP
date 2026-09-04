@@ -31,7 +31,7 @@ MCP Client (stdin/stdout JSON-RPC)
 
 ### Key Components
 
-**`App.xojo_code`** — Entry point. Registers all 25 tools in `Configure()`, auto-detects the Xojo documentation path under `~/Library/Application Support/Xojo/`, initializes `IDECommunicator` and optionally `SemanticSearch`. The global `App.IDE` instance is used by all IDE tools; `App.SemanticSearch` is used by `SearchDocs` when available.
+**`App.xojo_code`** — Entry point. Registers all 26 tools in `Configure()`, auto-detects the Xojo documentation path under `~/Library/Application Support/Xojo/`, initializes `IDECommunicator` and optionally `SemanticSearch`. The global `App.IDE` instance is used by all IDE tools; `App.SemanticSearch` is used by `SearchDocs` when available.
 
 **`IDECommunicator.xojo_code`** — Handles all IDE socket communication. Uses IDE Communicator Protocol v2 over a Unix domain socket (`/tmp/XojoIDE` or `/private/tmp/XojoIDE`). Messages are NUL-terminated JSON. Sends a `{"protocol": 2}` handshake, then uses tag-based correlation for synchronous request/response. Default timeout is 10 seconds; builds use 120 seconds.
 
@@ -43,7 +43,7 @@ MCP Client (stdin/stdout JSON-RPC)
 
 **`Build Automation.xojo_code`** — Xojo build steps that copy `usage-guide.md` and the `examples/` folder next to the binary at build time. Both are also exposed as MCP resources (`file://usage-guide.md` and `file://examples/<filename>`) so compatible clients like Claude Code can fetch them automatically at session start.
 
-**`SemanticSearch.xojo_code`** — Optional semantic search provider. Initialized at startup if `xojo_rag.db` exists in `DocsPath` and the embedding server at `http://localhost:8089/v1/embeddings` responds. Probed once at startup; `App.SemanticSearch` is `Nil` when unavailable (zero overhead). Uses async `URLConnection` + `DoEvents` loop, `SQLiteDatabase`, and cosine similarity over float32 blobs.
+**`SemanticSearch.xojo_code`** — RAG search provider with two tiers: `Available()` (semantic — DB + embedding server on `http://localhost:8089`, probed once at startup with a 2 s timeout) and `HasDatabase()` (keyword/BM25 — DB only, via `KeywordSearch`). Also serves `SearchNotesKeyword` for the `search_notes` tool and validates `metadata.embedding_dim` (≠768 disables the semantic tier). DB discovery order (in `App.Configure`): `--db-path` → `~/Library/Application Support/dk.o3jvind.xdox/xdox.db` (the XDOX app's canonical DB — the hardcoded bundle id is deliberate) → legacy `DocsPath/xojo_rag.db`. `App.SemanticSearch` is `Nil` only when no DB exists at all. Uses async `URLConnection` + `DoEvents` loop, `SQLiteDatabase`, and cosine similarity over float32 blobs.
 
 **`Tools/`** — 25 tool implementations, each inheriting `MCPKit.Tool` and implementing `Run(args() As MCPKit.ToolArgument) As MCPKit.ToolResult`:
 - **19 IDE tools**: list/navigate/read/write project items, build, run, stop, save, analyze, debug control, create items, run IDE scripts, get project info, revert, get/set item description, get/set constant value, get/set selected text
@@ -53,10 +53,7 @@ MCP Client (stdin/stdout JSON-RPC)
 
 ### Semantic search
 
-`SearchDocs` automatically uses semantic search when both conditions are met at startup:
-
-1. `DocsPath/xojo_rag.db` exists — the RAG database built by the XMCP-RAG indexer
-2. The embedding server is running at `http://localhost:8089/v1/embeddings` (llama.cpp with `nomic-embed-text`)
+`SearchDocs` degrades through three tiers: semantic (DB + embedding server — XDOX runs one on port 8089 while it is open), keyword BM25 (DB only), plain `llms-full.txt` scan (no DB). The RAG database is built and maintained by the XDOX app (XMCP-RAG-Indexer is deprecated for end users).
 
 If either is absent, `search_docs` falls back to keyword search transparently. The AI sees the same tool name and output format either way.
 

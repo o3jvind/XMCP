@@ -35,25 +35,64 @@ Inherits MCPKit.ServerApplication
 		  Else
 		    If Verbose Then System.DebugLog("WARNING: Xojo documentation not found. Doc tools will be unavailable.")
 		  End If
-		  
-		  // Initialize semantic search if the RAG database and embedding server are available.
-		  If DocsPath <> Nil Then
-		    Var dbFile As FolderItem = DocsPath.Child("xojo_rag.db")
-		    If dbFile <> Nil And dbFile.Exists Then
-		      SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", dbFile.NativePath)
-		      If Verbose Then
-		        If SemanticSearch.Available Then
-		          System.DebugLog("Semantic search enabled.")
-		        Else
-		          System.DebugLog("Semantic search unavailable (embedding server not running or DB not ready).")
-		          SemanticSearch = Nil
-		        End If
-		      ElseIf Not SemanticSearch.Available Then
-		        SemanticSearch = Nil
-		      End If
+
+		  // Locate the RAG database (Task 13). Search order:
+		  //   1. --db-path (explicit override)
+		  //   2. XDOX's canonical DB — XDOX is the user-friendly indexer app that
+		  //      replaced XMCP-RAG-Indexer; hardcoding its bundle id here is
+		  //      deliberate (XMCP is a separate process and cannot ask XDOX)
+		  //   3. Legacy xojo_rag.db next to the docs (XMCP-RAG-Indexer output)
+		  Var ragDB As FolderItem
+		  Var dbPathStr As String = CommandLineParser.StringValue("db-path")
+		  If dbPathStr <> "" Then
+		    ragDB = New FolderItem(dbPathStr, FolderItem.PathModes.Native)
+		    If ragDB = Nil Or Not ragDB.Exists Then
+		      System.DebugLog("WARNING: Specified db path does not exist: " + dbPathStr)
+		      ragDB = Nil
 		    End If
 		  End If
-		  
+		  Var xdoxDB As FolderItem = SpecialFolder.ApplicationData.Child("dk.o3jvind.xdox").Child("xdox.db")
+		  If ragDB = Nil And xdoxDB <> Nil And xdoxDB.Exists Then ragDB = xdoxDB
+		  If ragDB = Nil And DocsPath <> Nil Then
+		    Var legacyDB As FolderItem = DocsPath.Child("xojo_rag.db")
+		    If legacyDB <> Nil And legacyDB.Exists Then ragDB = legacyDB
+		  End If
+		  If ragDB = Nil Then
+		    // XDOX's canonical path — used even when the file doesn't exist yet:
+		    // SemanticSearch re-probes lazily, so a DB created after we start
+		    // (first XDOX launch, reindex after schema bump) is picked up without
+		    // restarting the MCP server.
+		    ragDB = xdoxDB
+		  End If
+
+		  // The DB alone enables keyword (BM25) search; a running embedding server
+		  // (XDOX manages one on port 8089) upgrades it to hybrid semantic search.
+		  // A running reranker (XDOX manages one on port 8093) further improves
+		  // result ordering on top of that — independently degradable, same as
+		  // the embedding tier. All three are re-checked at search time —
+		  // startup order no longer matters.
+		  // Search is optional: a construction failure (e.g. an unreadable or
+		  // corrupt DB file) must never prevent the stdio MCP server from
+		  // completing its handshake and exposing IDE tools.
+		  Try
+		    SemanticSearch = New SemanticSearch("http://localhost:8089/v1/embeddings", "http://localhost:8093/v1/rerank", ragDB.NativePath)
+		    If Verbose Then
+		      If SemanticSearch.HasDatabase Then
+		        System.DebugLog("RAG database: " + ragDB.NativePath)
+		        If SemanticSearch.Available Then
+		          System.DebugLog("Semantic search enabled (hybrid)" + If(SemanticSearch.RerankAvailable, " with reranking.", " — reranker not reachable, cosine+BM25 ordering only."))
+		        Else
+		          System.DebugLog("Embedding server not reachable — keyword (BM25) search only.")
+		        End If
+		      Else
+		        System.DebugLog("No RAG database yet at " + ragDB.NativePath + " — will re-check at search time; falling back to plain text scan meanwhile.")
+		      End If
+		    End If
+		  Catch e As RuntimeException
+		    SemanticSearch = Nil
+		    System.DebugLog("WARNING: RAG search disabled during startup: " + e.Message)
+		  End Try
+
 		  // Configure the file tool sandbox (opt-in via --enable-file-tools).
 		  Var fileToolsEnabled As Boolean = CommandLineParser.BooleanValue("enable-file-tools", False)
 		  Var fileRoots As String = CommandLineParser.StringValue("file-root", "")
@@ -106,7 +145,8 @@ Inherits MCPKit.ServerApplication
 		    Print("  hash_file            Hash a file with MD5 or SHA256 (requires --enable-file-tools)")
 		    Print("")
 		    Print("  Documentation Tools:")
-		    Print("  search_docs          Search Xojo documentation by keyword")
+		    Print("  search_docs          Search Xojo documentation (semantic/keyword)")
+		    Print("  search_notes         Search the user's personal XDOX notes")
 		    Print("  lookup_class         Look up detailed docs for a specific class")
 		    Print("  list_doc_topics      List available documentation topics")
 		    Print("")
@@ -149,6 +189,7 @@ Inherits MCPKit.ServerApplication
 		  CommandLineParser.AddOption("d", "docs-path", "Path to Xojo documentation directory (auto-detected if omitted)", MCPKit.OptionTypes.String)
 		  CommandLineParser.AddOption("", "enable-file-tools", "Enable the write_file/read_file/hash_file tools (disabled by default)", MCPKit.OptionTypes.Boolean)
 		  CommandLineParser.AddOption("", "file-root", "Comma-separated absolute paths the file tools may access (default: /tmp)", MCPKit.OptionTypes.String)
+		  CommandLineParser.AddOption("b", "db-path", "Path to the RAG database (default: XDOX's xdox.db, then legacy xojo_rag.db)", MCPKit.OptionTypes.String)
 		  
 		End Sub
 	#tag EndEvent
@@ -205,6 +246,7 @@ Inherits MCPKit.ServerApplication
 		  tools.Add(New GetItemDescription)
 		  tools.Add(New ConstantValue)
 		  tools.Add(New SearchDocs)
+		  tools.Add(New SearchNotes)
 		  tools.Add(New LookupClass)
 		  tools.Add(New ListDocTopics)
 		  tools.Add(New RevertProject)

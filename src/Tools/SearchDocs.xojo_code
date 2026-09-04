@@ -39,11 +39,20 @@ Inherits MCPKit.Tool
 		    Return MCPKit.ToolResult.Failure("The query parameter is required.")
 		  End If
 
-		  // Use semantic search when the embedding server and RAG database are available.
+		  // Tiered search (Task 13):
+		  //   1. semantic (hybrid) — needs the RAG DB + the embedding server
+		  //   2. keyword (BM25)    — needs only the RAG DB
+		  //   3. plain text scan of llms-full.txt — needs neither (last resort)
 		  If App.SemanticSearch <> Nil Then
-		    Var semanticResult As String = App.SemanticSearch.Search(query, maxResults)
-		    If semanticResult <> "" Then
-		      Return MCPKit.ToolResult.Success(semanticResult)
+		    If App.SemanticSearch.Available Then
+		      Var semanticResult As String = App.SemanticSearch.Search(query, maxResults)
+		      If semanticResult <> "" Then
+		        Return MCPKit.ToolResult.Success(semanticResult)
+		      End If
+		    End If
+		    Var keywordResult As String = App.SemanticSearch.KeywordSearch(query, maxResults)
+		    If keywordResult <> "" Then
+		      Return MCPKit.ToolResult.Success(keywordResult)
 		    End If
 		  End If
 
