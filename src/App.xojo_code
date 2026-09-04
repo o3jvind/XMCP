@@ -93,37 +93,22 @@ Inherits MCPKit.ServerApplication
 		    System.DebugLog("WARNING: RAG search disabled during startup: " + e.Message)
 		  End Try
 
-		  // Register all MCP tools.
-		  RegisterTools( _
-		  New ListProjectItems, _
-		  New GetCurrentLocation, _
-		  New SelectProjectItem, _
-		  New GetCode, _
-		  New SetCode, _
-		  New GetSelectedText, _
-		  New SetSelectedText, _
-		  New BuildProject, _
-		  New RunProject, _
-		  New StopProject, _
-		  New CreateProjectItem, _
-		  New RunIDEScript, _
-		  New GetProjectInfo, _
-		  New GetItemDescription, _
-		  New ConstantValue, _
-		  New SearchDocs, _
-		  New SearchNotes, _
-		  New LookupClass, _
-		  New ListDocTopics, _
-		  New RevertProject, _
-		  New EstimateRequestCost, _
-		  New GetDebugLog, _
-		  New GetSystemLog, _
-		  New SaveProject, _
-		  New AnalyzeProject, _
-		  New DebugControl _
-		  )
-
-		  If Verbose Then System.DebugLog("XMCP server configured with 26 tools.")
+		  // Configure the file tool sandbox (opt-in via --enable-file-tools).
+		  Var fileToolsEnabled As Boolean = CommandLineParser.BooleanValue("enable-file-tools", False)
+		  Var fileRoots As String = CommandLineParser.StringValue("file-root", "")
+		  FileGuard.Configure(fileToolsEnabled, fileRoots)
+		  If Verbose And fileToolsEnabled Then
+		    Var rootsDesc As String = FileGuard.AllowedRootsDescription
+		    System.DebugLog("File tools enabled. Allowed roots: " + rootsDesc)
+		  End If
+		  
+		  // Register all MCP tools from the same list used by terminal help.
+		  Var tools() As MCPKit.Tool = ConfiguredTools
+		  For Each tool As MCPKit.Tool In tools
+		    RegisterTools(tool)
+		  Next tool
+		  
+		  If Verbose Then System.DebugLog("XMCP server configured with " + tools.Count.ToString + " tools.")
 		  
 		End Sub
 	#tag EndEvent
@@ -133,7 +118,7 @@ Inherits MCPKit.ServerApplication
 		  If CommandLineParser.HelpRequested Then
 		    CommandLineParser.ShowHelp("Options")
 		    Print("")
-		    Print("MCP Tools (26):")
+		    Print("MCP Tools (" + ConfiguredTools.Count.ToString + "):")
 		    Print("")
 		    Print("  IDE Tools:")
 		    Print("  list_project_items   List child items at a project location")
@@ -155,6 +140,9 @@ Inherits MCPKit.ServerApplication
 		    Print("  save_project         Save the project to disk")
 		    Print("  analyze_project      Analyze project for errors and warnings")
 		    Print("  debug_control        Step, resume, or pause an active debug session")
+		    Print("  write_file           Write a file on disk (requires --enable-file-tools)")
+		    Print("  read_file            Read a file from disk (requires --enable-file-tools)")
+		    Print("  hash_file            Hash a file with MD5 or SHA256 (requires --enable-file-tools)")
 		    Print("")
 		    Print("  Documentation Tools:")
 		    Print("  search_docs          Search Xojo documentation (semantic/keyword)")
@@ -174,6 +162,10 @@ Inherits MCPKit.ServerApplication
 		    Print("  It connects to the Xojo IDE via the IPC socket at /tmp/XojoIDE (or /private/tmp/XojoIDE).")
 		    Print("  Documentation is auto-detected from ~/Library/Application Support/Xojo/")
 		    Print("  or can be specified with --docs-path.")
+		    Print("")
+		    Print("  The write_file/read_file/hash_file tools are disabled by default. Enable")
+		    Print("  them with --enable-file-tools and restrict access with --file-root, a")
+		    Print("  comma-separated list of absolute paths (default: /tmp).")
 		    Print("")
 		    Print("  Make sure the Xojo IDE is running before starting this server.")
 		    Print("")
@@ -195,6 +187,8 @@ Inherits MCPKit.ServerApplication
 		Sub WillParseOptions()
 		  CommandLineParser.AppDescription = "MCP server for controlling the Xojo IDE"
 		  CommandLineParser.AddOption("d", "docs-path", "Path to Xojo documentation directory (auto-detected if omitted)", MCPKit.OptionTypes.String)
+		  CommandLineParser.AddOption("", "enable-file-tools", "Enable the write_file/read_file/hash_file tools (disabled by default)", MCPKit.OptionTypes.Boolean)
+		  CommandLineParser.AddOption("", "file-root", "Comma-separated absolute paths the file tools may access (default: /tmp)", MCPKit.OptionTypes.String)
 		  CommandLineParser.AddOption("b", "db-path", "Path to the RAG database (default: XDOX's xdox.db, then legacy xojo_rag.db)", MCPKit.OptionTypes.String)
 		  
 		End Sub
@@ -225,6 +219,53 @@ Inherits MCPKit.ServerApplication
 		  If aNorm > bNorm Then Return 1
 		  If aNorm < bNorm Then Return -1
 		  Return 0
+		  
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function ConfiguredTools() As MCPKit.Tool()
+		  /// Returns the complete tool list exposed by XMCP.
+		  /// Keep this as the single source of truth for startup registration and
+		  /// terminal help counts so documentation cannot drift from reality.
+		  
+		  Var tools() As MCPKit.Tool
+		  tools.Add(New ListProjectItems)
+		  tools.Add(New GetCurrentLocation)
+		  tools.Add(New SelectProjectItem)
+		  tools.Add(New GetCode)
+		  tools.Add(New SetCode)
+		  tools.Add(New GetSelectedText)
+		  tools.Add(New SetSelectedText)
+		  tools.Add(New BuildProject)
+		  tools.Add(New RunProject)
+		  tools.Add(New StopProject)
+		  tools.Add(New CreateProjectItem)
+		  tools.Add(New RunIDEScript)
+		  tools.Add(New GetProjectInfo)
+		  tools.Add(New GetItemDescription)
+		  tools.Add(New ConstantValue)
+		  tools.Add(New SearchDocs)
+		  tools.Add(New SearchNotes)
+		  tools.Add(New LookupClass)
+		  tools.Add(New ListDocTopics)
+		  tools.Add(New RevertProject)
+		  tools.Add(New EstimateRequestCost)
+		  tools.Add(New GetDebugLog)
+		  tools.Add(New GetSystemLog)
+		  tools.Add(New SaveProject)
+		  tools.Add(New AnalyzeProject)
+		  tools.Add(New DebugControl)
+		  // File tools are opt-in: direct filesystem access is a larger attack
+		  // surface than the IDE-mediated tools, so it requires an explicit flag.
+		  Var enableFileTools As Boolean = CommandLineParser.BooleanValue("enable-file-tools", False)
+		  If enableFileTools Then
+		    tools.Add(New WriteFile)
+		    tools.Add(New ReadFile)
+		    tools.Add(New HashFile)
+		  End If
+		  
+		  Return tools
 		  
 		End Function
 	#tag EndMethod
@@ -287,6 +328,30 @@ Inherits MCPKit.ServerApplication
 		  
 		End Function
 	#tag EndMethod
+
+
+	#tag Note, Name = refactoring
+		Starting XMCP with the flags
+		The two new options work together: --enable-file-tools switches the three file tools on (without it, XMCP starts with 25 tools and no filesystem access at all), and --file-root takes a comma-separated list of absolute directories the tools may touch. If you enable the tools but omit --file-root, the sandbox defaults to /tmp alone — enough for script deployment but nothing else.
+		For Claude Desktop, this lives in the args array of the config, which I've already set up for you:
+		json"xmcp": {
+		  "command": "/Users/philipcumpston/GitHub/XMCP/src/Builds - XMCP/macOS ARM 64 bit/XMCP/XMCP",
+		  "args": [
+		    "--docs-path", "/Users/philipcumpston/Library/Application Support/Xojo/Xojo/Xojo 2026r1.2/Documentation",
+		    "--enable-file-tools",
+		    "--file-root", "/tmp,/Users/philipcumpston/GitHub"
+		  ]
+		}
+		Note that --file-root and its value are separate array elements, and the comma-separated list is one string with no spaces around the commas. You never launch XMCP yourself in normal use — Claude Desktop starts it when the app launches, so the flags take effect at your next restart of Claude Desktop.
+		For testing in Terminal, you can launch the binary directly. --help shows the options and the annotated tool list, and a manual run with flags looks like:
+		bash"/Users/philipcumpston/GitHub/XMCP/src/Builds - XMCP/macOS ARM 64 bit/XMCP/XMCP" \
+		  --enable-file-tools --file-root "/tmp,/Users/philipcumpston/GitHub"
+		It will sit waiting for JSON-RPC on stdin (Ctrl-C to quit) — that's exactly how my test harness drove it. Adding -v turns on verbose logging, which now includes a startup line confirming the resolved roots: File tools enabled. Allowed roots: /private/tmp, /Users/philipcumpston/GitHub (the /private prefix is the canonicalised form of /tmp and is expected).
+		For Claude Code, if you ever use XMCP there, the equivalent is claude mcp add xmcp -- "/path/to/XMCP" --enable-file-tools --file-root "/tmp,/Users/philipcumpston/GitHub" — though for that audience you'd typically omit both flags, since Claude Code has its own file tools, which is precisely the default-off behaviour the maintainer wanted.
+		
+		
+	#tag EndNote
+
 
 	#tag Property, Flags = &h0, Description = 5061746820746F20586F6A6F20646F63756D656E746174696F6E206469726563746F72792E
 		DocsPath As FolderItem

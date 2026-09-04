@@ -34,6 +34,22 @@ XMCP gives you direct control over the Xojo IDE via 25 tools:
 - **Debugging**: `get_debug_log`, `get_system_log`
 - **Cost estimation**: `estimate_request_cost` — call this proactively before broad or documentation-heavy tasks to check whether the approach is likely to be expensive, and to get suggestions for cheaper alternatives
 
+### Optional file tools (opt-in)
+
+Three additional tools — `write_file`, `read_file`, and `hash_file` — provide direct filesystem access for MCP clients that lack built-in file tools (e.g. Claude Desktop). They are **disabled by default** and only registered when the server is started with `--enable-file-tools`, bringing the tool count to 28.
+
+When enabled, access is restricted to an allowlist of directories given via `--file-root` as comma-separated absolute paths (default: `/tmp`). Paths are lexically canonicalised before checking: `.` and `..` segments are resolved, duplicate slashes collapsed, and the macOS symlinked prefixes `/tmp`, `/var` and `/etc` are mapped to their `/private` equivalents. Requests outside the allowed roots fail with an "Access denied" result. Known limitation: symlinks *inside* an allowed root are not resolved and can point outside it.
+
+- `write_file` — write UTF-8 text to a file (whole-file replace); parent directory must exist
+- `read_file` — read UTF-8 text; `offset`/`length` are **character** offsets, so chunked reads never split a multibyte sequence
+- `hash_file` — MD5 or SHA-256 hex digest, streamed in 1 MB chunks (arbitrarily large files supported)
+
+Typical Claude Desktop configuration:
+
+```json
+"args": ["--enable-file-tools", "--file-root", "/tmp,/Users/you/GitHub"]
+```
+
 ---
 
 ## Trust model — XMCP is a full-trust local bridge
