@@ -56,91 +56,14 @@ Inherits MCPKit.Tool
 		    Return MCPKit.ToolResult.Failure("Path is a folder, not a file: " + path)
 		  End If
 		  
-		  Try
-		    
-		    Var bs As BinaryStream = BinaryStream.Open(f)
-		    Var hash As String
-		    
-		    Select Case algorithm
-		    Case "md5"
-		      hash = StreamMD5(bs)
-		    Case "sha256"
-		      hash = StreamSHA256(bs)
-		    Else
-		      bs.Close
-		      Return MCPKit.ToolResult.Failure("Unknown algorithm '" + algorithm + "'. Use 'md5' or 'sha256'.")
-		    End Select
-		    
-		    bs.Close
-		    
-		    Return MCPKit.ToolResult.Success(algorithm + ": " + hash + "  " + f.Name)
-		    
-		  Catch e As IOException
-		    Return MCPKit.ToolResult.Failure("Unable to read file: " + e.Message)
-		    
-		  Catch e As RuntimeException
-		    Return MCPKit.ToolResult.Failure("Hashing failed: " + e.Message)
-		    
-		  End Try
-		  
-		End Function
-	#tag EndMethod
+		  Var digestError As String
+		  Var hash As String = FileDigest.OfFile(f, algorithm, digestError)
 
-	#tag Method, Flags = &h21
-		Private Function StreamMD5(bs As BinaryStream) As String
-		  // Incrementally hash the stream in 1 MB chunks so files of arbitrary
-		  // size never require a whole-file MemoryBlock.
-		  
-		  Var chunkSize As Integer = 1048576
-		  Var digest As New MD5Digest
-		  
-		  While Not bs.EndOfFile
-		    Var chunk As String = bs.Read(chunkSize)
-		    digest.Process(chunk)
-		  Wend
-		  
-		  Var raw As String = digest.Value
-		  Var hexed As String = EncodeHex(raw)
-		  Return hexed.Lowercase
-		  
-		End Function
-	#tag EndMethod
+		  If hash = "" Then
+		    Return MCPKit.ToolResult.Failure(digestError)
+		  End If
 
-	#tag Method, Flags = &h21
-		Private Function StreamSHA256(bs As BinaryStream) As String
-		  // Xojo has no incremental SHA-256 class (only the one-shot
-		  // Crypto.SHA2_256), so on macOS we stream through CommonCrypto.
-		  // On other platforms we fall back to a whole-file read — a known
-		  // limitation until Xojo gains an incremental SHA-2 API.
-		  
-		  #If TargetMacOS Then
-		    Declare Function CC_SHA256_Init Lib "/usr/lib/libSystem.dylib" (ctx As Ptr) As Integer
-		    Declare Function CC_SHA256_Update Lib "/usr/lib/libSystem.dylib" (ctx As Ptr, data As Ptr, length As UInt32) As Integer
-		    Declare Function CC_SHA256_Final Lib "/usr/lib/libSystem.dylib" (md As Ptr, ctx As Ptr) As Integer
-		    
-		    // CC_SHA256_CTX is 104 bytes; allocate a little extra for safety.
-		    Var chunkSize As Integer = 1048576
-		    Var ctx As New MemoryBlock(112)
-		    Call CC_SHA256_Init(ctx)
-		    
-		    While Not bs.EndOfFile
-		      Var chunk As String = bs.Read(chunkSize)
-		      Var mb As MemoryBlock = chunk
-		      Call CC_SHA256_Update(ctx, mb, mb.Size)
-		    Wend
-		    
-		    Var out As New MemoryBlock(32)
-		    Call CC_SHA256_Final(out, ctx)
-		    
-		    Var raw As String = out.StringValue(0, 32)
-		    Var hexed As String = EncodeHex(raw)
-		    Return hexed.Lowercase
-		  #Else
-		    Var data As MemoryBlock = bs.Read(bs.Length)
-		    Var raw As String = Crypto.SHA2_256(data)
-		    Var hexed As String = EncodeHex(raw)
-		    Return hexed.Lowercase
-		  #EndIf
+		  Return MCPKit.ToolResult.Success(algorithm + ": " + hash + "  " + f.Name)
 		  
 		End Function
 	#tag EndMethod

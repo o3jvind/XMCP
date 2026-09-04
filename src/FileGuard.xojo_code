@@ -22,7 +22,9 @@ Protected Module FileGuard
 		    Var candidate As String = p.Trim
 		    Var norm As String = NormalizePath(candidate)
 		    If norm <> "" Then
-		      mRoots.Add(norm)
+		      // Resolve the root itself: a root that is a symlink would otherwise
+		      // never match the resolved paths it is compared against.
+		      mRoots.Add(NormalizePath(ResolvedOrLexical(norm)))
 		    End If
 		  Next p
 		  
@@ -52,9 +54,8 @@ Protected Module FileGuard
 		  //   - maps the standard macOS symlinked prefixes /tmp, /var and /etc
 		  //     to their /private equivalents so comparisons are consistent
 		  //
-		  // Known limitation: canonicalisation is lexical only. Symlinks inside
-		  // an allowed root can still point outside it. This is documented in
-		  // the tool descriptions.
+		  // Lexical only by design -- callers pair this with ResolvedOrLexical,
+		  // which resolves symlinks, and re-normalise the result.
 		  
 		  Var t As String = path.Trim
 		  Var firstChar As String = t.Left(1)
@@ -107,6 +108,10 @@ Protected Module FileGuard
 		    reason = "Path must be absolute: " + path
 		    Return False
 		  End If
+
+		  // Resolve symlinks before comparing. Lexical normalisation alone lets a
+		  // link inside an allowed root point anywhere on the disk.
+		  norm = NormalizePath(ResolvedOrLexical(norm))
 		  
 		  For Each root As String In mRoots
 		    If norm = root Then Return True
@@ -125,6 +130,70 @@ Protected Module FileGuard
 		  reason = "Access denied: '" + path + "' is outside the allowed file roots (" + rootsList + "). Adjust with --file-root."
 		  Return False
 		  
+		End Function
+	#tag EndMethod
+
+
+	#tag Method, Flags = &h21
+		Private Function RealPath(path As String) As String
+		  // Resolves symlinks via realpath(3). Returns "" when the path does not
+		  // exist, or on platforms without the call, leaving the caller on the
+		  // lexical result.
+
+		  #If TargetMacOS Then
+		    Declare Function realpath Lib "/usr/lib/libSystem.dylib" (path As CString, resolved As Ptr) As Ptr
+
+		    Var buffer As New MemoryBlock(4096)
+		    Var answer As Ptr = realpath(path, buffer)
+		    If answer = Nil Then
+		      Return ""
+		    End If
+
+		    Return buffer.CString(0)
+		  #Else
+		    #Pragma Unused path
+		    Return ""
+		  #EndIf
+
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function ResolvedOrLexical(path As String) As String
+		  // Symlink-resolved form of an already lexically normalised path.
+		  // A file that does not exist yet cannot be resolved directly, so the
+		  // parent is resolved instead and the name reattached -- which is exactly
+		  // the case that matters when creating a file. Falls back to the input.
+
+		  Var direct As String = RealPath(path)
+		  If direct <> "" Then
+		    Return direct
+		  End If
+
+		  Var segs() As String = path.Split("/")
+		  If segs.Count < 2 Then
+		    Return path
+		  End If
+
+		  Var baseName As String = segs(segs.LastIndex)
+		  segs.RemoveAt(segs.LastIndex)
+
+		  Var parent As String = String.FromArray(segs, "/")
+		  If parent = "" Then
+		    parent = "/"
+		  End If
+
+		  Var realParent As String = RealPath(parent)
+		  If realParent = "" Then
+		    Return path
+		  End If
+
+		  If realParent = "/" Then
+		    Return "/" + baseName
+		  End If
+
+		  Return realParent + "/" + baseName
+
 		End Function
 	#tag EndMethod
 
@@ -148,8 +217,13 @@ Protected Module FileGuard
 		injection, confused deputy), so it is opt-in and sandboxed.
 		
 		Canonicalisation is lexical (dot-segments, duplicate slashes, macOS /private
-		prefix mapping). Symlinks inside an allowed root are not resolved — a known,
-		documented limitation.
+		prefix mapping) and is then resolved through realpath(3), so a symlink inside
+		an allowed root cannot be used to write outside it. For a path that does not
+		exist yet the parent is resolved and the name reattached.
+
+		Residual risk: the check and the subsequent open are separate syscalls, so a
+		symlink swapped in between the two would still escape. Xojo exposes no
+		openat-style primitive, so this is narrowed rather than eliminated.
 	#tag EndNote
 
 	#tag ViewBehavior
