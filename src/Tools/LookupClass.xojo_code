@@ -100,12 +100,15 @@ Inherits MCPKit.Tool
 		    Var anchorPrefix As String = ".. _" + classKey + "."
 		    Var anchorAt() As Integer
 		    Var members() As String
+		    Var displayNames() As String
 
 		    For i As Integer = 0 To lines.LastIndex
 		      Var t As String = lines(i).Trim
 		      If t.BeginsWith(anchorPrefix) And t.EndsWith(":") Then
+		        Var key As String = t.Middle(anchorPrefix.Length, t.Length - anchorPrefix.Length - 1)
 		        anchorAt.Add(i)
-		        members.Add(t.Middle(anchorPrefix.Length, t.Length - anchorPrefix.Length - 1))
+		        members.Add(key)
+		        displayNames.Add(DisplayName(lines, i, key))
 		      End If
 		    Next i
 
@@ -119,7 +122,7 @@ Inherits MCPKit.Tool
 		      Next i
 
 		      If wanted = -1 Then
-		        Return MCPKit.ToolResult.Failure("No member named " + memberName + " on " + className + ". Available members: " + String.FromArray(members, ", "))
+		        Return MCPKit.ToolResult.Failure("No member named " + memberName + " on " + className + ". Available members: " + String.FromArray(displayNames, ", "))
 		      End If
 
 		      Var lastLine As Integer = lines.LastIndex
@@ -127,8 +130,19 @@ Inherits MCPKit.Tool
 		        lastLine = anchorAt(wanted + 1) - 1
 		      End If
 
+		      // The label line and the transition rule under it delimit the entry;
+		      // neither belongs in the output.
+		      Var firstLine As Integer = anchorAt(wanted) + 1
+		      While firstLine <= lastLine
+		        Var t As String = lines(firstLine).Trim
+		        If t <> "" And Not IsRule(t) Then
+		          Exit
+		        End If
+		        firstLine = firstLine + 1
+		      Wend
+
 		      Var section() As String
-		      For i As Integer = anchorAt(wanted) To lastLine
+		      For i As Integer = firstLine To lastLine
 		        section.Add(lines(i))
 		      Next i
 
@@ -147,7 +161,7 @@ Inherits MCPKit.Tool
 		      head.Add(lines(i))
 		    Next i
 
-		    Var summary As String = CleanRST(String.FromArray(head, EndOfLine))
+		    Var summary As String = DropDanglingHeading(CleanRST(String.FromArray(head, EndOfLine)))
 		    If members.Count > 0 Then
 		      summary = summary + EndOfLine + EndOfLine + "--- " + members.Count.ToString + _
 		      " documented members on this page. Call lookup_class again with a member name for one member's full entry, or full=true for the whole page. ---"
@@ -262,7 +276,7 @@ Inherits MCPKit.Tool
 		    Var t As String = line.Trim
 
 		    If t.BeginsWith(".. rst-class::") Or t.BeginsWith(".. csv-table::") _
-		      Or t.BeginsWith(":header:") Or t.BeginsWith(":widths:") Then
+		      Or t.BeginsWith(".. code::") Or t.BeginsWith(":header:") Or t.BeginsWith(":widths:") Then
 		      Continue
 		    End If
 
@@ -279,6 +293,92 @@ Inherits MCPKit.Tool
 		  Next line
 
 		  Return String.FromArray(kept, EndOfLine).Trim
+
+		End Function
+	#tag EndMethod
+
+
+	#tag Method, Flags = &h21
+		Private Function DisplayName(lines() As String, anchorIndex As Integer, key As String) As String
+		  /// Anchor labels are lowercased, so recover the documented spelling from
+		  /// the heading just below the label. Falls back to the label itself.
+
+		  Var limit As Integer = anchorIndex + 8
+		  If limit > lines.LastIndex Then
+		    limit = lines.LastIndex
+		  End If
+
+		  For i As Integer = anchorIndex + 1 To limit
+		    Var t As String = lines(i).Trim
+		    If t.Lowercase = key Then
+		      Return t
+		    End If
+		  Next i
+
+		  Return key
+
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function IsRule(text As String) As Boolean
+		  /// True for a reStructuredText underline or transition row, e.g. "-----".
+
+		  If text.Length < 3 Then
+		    Return False
+		  End If
+
+		  For i As Integer = 0 To text.Length - 1
+		    Var c As String = text.Middle(i, 1)
+		    If c <> "-" And c <> "=" Then
+		      Return False
+		    End If
+		  Next i
+
+		  Return True
+
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function DropDanglingHeading(text As String) As String
+		  /// Splitting the page at the first member label strands the heading that
+		  /// introduced the entries ("Method descriptions" and its underline) with
+		  /// nothing beneath it. Remove such a pair from the tail.
+		  ///
+		  /// Conditions are tested one at a time rather than combined: Xojo's And
+		  /// evaluates both operands, so a bounds check cannot guard an index in
+		  /// the same expression.
+
+		  Var lines() As String = text.ReplaceLineEndings(EndOfLine).Split(EndOfLine)
+		  Var passes As Integer = 0
+
+		  While passes < 4
+		    passes = passes + 1
+
+		    While lines.LastIndex >= 0
+		      If lines(lines.LastIndex).Trim <> "" Then
+		        Exit
+		      End If
+		      lines.RemoveAt(lines.LastIndex)
+		    Wend
+
+		    If lines.LastIndex < 1 Then
+		      Exit
+		    End If
+		    If Not IsRule(lines(lines.LastIndex).Trim) Then
+		      Exit
+		    End If
+		    If lines(lines.LastIndex - 1).Trim = "" Then
+		      // A standalone transition rule, not a heading underline.
+		      Exit
+		    End If
+
+		    lines.RemoveAt(lines.LastIndex)
+		    lines.RemoveAt(lines.LastIndex)
+		  Wend
+
+		  Return String.FromArray(lines, EndOfLine)
 
 		End Function
 	#tag EndMethod
