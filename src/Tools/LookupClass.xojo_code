@@ -100,15 +100,12 @@ Inherits MCPKit.Tool
 		    Var anchorPrefix As String = ".. _" + classKey + "."
 		    Var anchorAt() As Integer
 		    Var members() As String
-		    Var displayNames() As String
 
 		    For i As Integer = 0 To lines.LastIndex
 		      Var t As String = lines(i).Trim
 		      If t.BeginsWith(anchorPrefix) And t.EndsWith(":") Then
-		        Var key As String = t.Middle(anchorPrefix.Length, t.Length - anchorPrefix.Length - 1)
 		        anchorAt.Add(i)
-		        members.Add(key)
-		        displayNames.Add(DisplayName(lines, i, key))
+		        members.Add(t.Middle(anchorPrefix.Length, t.Length - anchorPrefix.Length - 1))
 		      End If
 		    Next i
 
@@ -122,7 +119,7 @@ Inherits MCPKit.Tool
 		      Next i
 
 		      If wanted = -1 Then
-		        Return MCPKit.ToolResult.Failure("No member named " + memberName + " on " + className + ". Available members: " + String.FromArray(displayNames, ", "))
+		        Return MCPKit.ToolResult.Failure("No member named " + memberName + " on " + className + ". Available members: " + String.FromArray(members, ", "))
 		      End If
 
 		      Var lastLine As Integer = lines.LastIndex
@@ -297,28 +294,6 @@ Inherits MCPKit.Tool
 		End Function
 	#tag EndMethod
 
-
-	#tag Method, Flags = &h21
-		Private Function DisplayName(lines() As String, anchorIndex As Integer, key As String) As String
-		  /// Anchor labels are lowercased, so recover the documented spelling from
-		  /// the heading just below the label. Falls back to the label itself.
-
-		  Var limit As Integer = anchorIndex + 8
-		  If limit > lines.LastIndex Then
-		    limit = lines.LastIndex
-		  End If
-
-		  For i As Integer = anchorIndex + 1 To limit
-		    Var t As String = lines(i).Trim
-		    If t.Lowercase = key Then
-		      Return t
-		    End If
-		  Next i
-
-		  Return key
-
-		End Function
-	#tag EndMethod
 
 	#tag Method, Flags = &h21
 		Private Function IsRule(text As String) As Boolean
