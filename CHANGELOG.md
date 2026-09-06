@@ -2,6 +2,14 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.9.1] - 2026-09-06
+
+### Fixed
+- **`IDECommunicator.RunScript`**: stopped re-parsing string tool output as JSON to look for `scriptError`/`buildError` keys. No `RunScript` caller ever emits that shape (only `DoCommand "RunApp"`/`"BuildApp"` do, and they bypass `RunScript` and call `SendAndReceive` directly) — the check only ever misclassified legitimate text as a failure, e.g. a constant value or item description whose content happened to contain the literal text `{"buildError":...}`. Also normalizes an empty-object IDE response (`{}`) back to `""`.
+- **`Tool.BuildStringVariableScript`** (shared by `constant_value`, `get_item_description`, `set_code`, `set_selected_text`): rebuilt to split on CRLF/CR/LF individually and join segments with explicit `Chr(13)`/`Chr(10)` separators, instead of splitting only on `EndOfLine` (LF-only on macOS) and appending `+ EndOfLine` after every element. This fixed three related bugs: a value already ending in a line break got an extra blank line appended on write; a lone CR left a raw control byte inside a generated script's string literal, which could break the script's syntax; and `constant_value`'s read-back verification compared against the same corrupted value it had just written, so neither bug was ever caught by the "did the write take effect" check.
+- **`scaffold_code_block`**: `EscapeConstantDefault` now normalizes CRLF and lone CR to LF before escaping a constant `Default` value. Previously a lone CR was silently deleted by the `constant_escape` table's `"\r" -> ""` entry (corrupting the value), and any line break split the generated `#tag Constant` line, producing an invalid definition. `usage-guide.md`'s `constant_escape` table now also maps `\n` to the `.xojo_window`-style `\n` escape.
+- **`ServerApplication`**: `RequestID` is now reset to `Nil` before parsing each stdin line, so a JSON parse failure correctly reports `id: null` per the JSON-RPC spec instead of reusing the previous successful request's id.
+
 ## [1.9.0] - 2026-09-06
 
 ### Added

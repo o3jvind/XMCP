@@ -209,7 +209,7 @@ Gets or sets the value of a project constant. The constant must already exist in
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `name` | String | Yes | The constant name. Can be simple (e.g. `kVersion`) or fully qualified (e.g. `App.kVersion`). |
+| `name` | String | Yes | The fully-qualified constant name (e.g. `App.kVersion`). A bare name (e.g. `kVersion`) silently fails in the Xojo IDE scripting API — always qualify with the containing module or class. |
 | `value` | String | No | If provided, sets the constant to this value. If omitted, returns the current value. |
 
 #### `save_project`
