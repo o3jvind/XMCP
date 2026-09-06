@@ -241,13 +241,20 @@ Inherits MCPKit.Tool
 		  Var escapeMap As JSONItem = rules.Lookup("constant_escape", Nil)
 		  Var quoteChar As String = Chr(34)
 
+		  // Normalize CRLF and lone CR to LF before escaping, so every line
+		  // break variant maps to the same \n escape instead of the CR being
+		  // silently dropped by the constant_escape table's "\r" -> "" entry
+		  // (which exists only to collapse the CR half of a CRLF pair).
+		  Var normalized As String = rawValue.ReplaceAll(Chr(13) + Chr(10), Chr(10))
+		  normalized = normalized.ReplaceAll(Chr(13), Chr(10))
+
 		  // Backslash-sensitive replacement order matters: escape characters
 		  // one at a time over the ORIGINAL string's characters, not the
 		  // growing result, to avoid double-escaping already-inserted
 		  // backslashes. Build the output character by character instead.
 		  Var output As String = ""
-		  For i As Integer = 0 To rawValue.Length - 1
-		    Var ch As String = rawValue.Middle(i, 1)
+		  For i As Integer = 0 To normalized.Length - 1
+		    Var ch As String = normalized.Middle(i, 1)
 		    Var replaced As Boolean = False
 
 		    If ch = quoteChar Then

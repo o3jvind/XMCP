@@ -35,22 +35,27 @@ Inherits MCPKit.Tool
 		    Return MCPKit.ToolResult.Failure("Xojo IDE is not connected. Start the IDE and restart XMCP.")
 		  End If
 
-		  Var navScript As String = ""
-		  If location <> "" Then
-		    navScript = "If Not SelectProjectItem(""" + location.ReplaceAll("""", """""") + """) Then" + EndOfLine + _
-		    "  Print ""ERROR: Could not navigate to: " + location.ReplaceAll("""", """""") + """" + EndOfLine + _
-		    "  End" + EndOfLine + _
-		    "End If" + EndOfLine
+		  Var action As String
+		  If hasValue Then
+		    ' Build the value via a String variable (not inline between literal
+		    ' quotes) so a value containing a newline doesn't break the script
+		    ' across lines.
+		    action = BuildStringVariableScript("__value", value) + EndOfLine + _
+		    "ItemDescription = __value" + EndOfLine + _
+		    "Print ""OK"""
+		  Else
+		    action = "Print ItemDescription"
 		  End If
 
 		  Var script As String
-		  If hasValue Then
-		    script = navScript + _
-		    "ItemDescription = """ + value.ReplaceAll("""", """""") + """" + EndOfLine + _
-		    "Print ""OK"""
+		  If location <> "" Then
+		    script = "If Not SelectProjectItem(""" + location.ReplaceAll("""", """""") + """) Then" + EndOfLine + _
+		    "  Print ""ERROR: Could not navigate to: " + location.ReplaceAll("""", """""") + """" + EndOfLine + _
+		    "Else" + EndOfLine + _
+		    "  " + action + EndOfLine + _
+		    "End If"
 		  Else
-		    script = navScript + _
-		    "Print ItemDescription"
+		    script = action
 		  End If
 
 		  Return App.IDE.RunScript(script)

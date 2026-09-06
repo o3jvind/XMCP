@@ -347,7 +347,9 @@ Keep the fenced block valid JSON. Do not remove keys the tools rely on without u
   "constant_escape": {
     "'": "\\'",
     "=": "\\x3D",
-    ",": "\\x2C"
+    ",": "\\x2C",
+    "\n": "\\n",
+    "\r": ""
   },
   "constant_quote_rule": {
     "xojo_window": "all quotes escaped as \\\"",
@@ -361,17 +363,49 @@ Keep the fenced block valid JSON. Do not remove keys the tools rely on without u
 
 ## IDE tool limitations to be aware of
 
+### `run_ide_script` shows an empty `Print` result as the literal text `{}`
+
+If a script's `Print` output is an empty string, `run_ide_script` shows this as the literal two-character text `{}` — that reflects an empty result, not an error. Structured tools that go through the same underlying IDE communication (`list_project_items`, `debug_control`, `constant_value`, etc.) normalize this correctly internally and don't leak `{}` into their own success/failure logic, but their MCP output can still render as an empty-looking result when the underlying value genuinely is empty — that's expected, not a sign of failure.
+
 ### Never use `DoCommand "Insert..."` to add controls to windows
 
 Using `DoCommand "Insert..."` commands (e.g. `DoCommand "InsertDesktopButton"`) to add UI controls to a window **disconnects the Xojo IDE's IPC socket**, making all subsequent XMCP tool calls fail until the IDE is restarted.
 
 Always add controls by editing the `.xojo_window` file directly on disk instead. Use `examples/Window1.xojo_window` as a reference for the correct control block format and event handler structure.
 
+**`create_project_item` is not affected by this and is safe to use.** The disconnect bug is specific to inserting a control instance onto an already-open window design canvas (`DoCommand "InsertDesktopButton"` and similar `Insert...` commands), not to creating new top-level project items — `create_project_item`'s `item_type` list (`NewMethod`, `NewNote`, `NewWindow`, `NewContainerControl`, etc.) doesn't include any `Insert...` commands, so it can't trigger this bug. New items land only in the IDE's in-memory project state until `save_project` is called, same as `set_code`.
+
 ### `select_project_item` cannot navigate to methods or events
 
 The IDE scripting API can navigate to top-level items, classes, modules, and windows — but not to individual methods, properties, or event implementations. Edit the source file directly on disk instead.
 
+This is why the `location` parameter on `get_code`, `set_code`, and `get_item_description` only works for top-level items (classes, modules, windows) — passing a method or property path (e.g. `Module1.AddNumbers`) returns `"Could not navigate to: ..."` even when that method exists, because the underlying navigation call can't reach it. Omit `location` and rely on whatever the user currently has open in the IDE's code editor instead.
+
 `list_project_items` also does not list events — only methods, properties, and constants appear as children.
+
+**In practice this is narrower than it sounds.** `list_project_items` wraps the IDE's `SubLocations` scripting function directly, with no XMCP-side filtering. It returns real children for a location that contains sub-*classes* (e.g. a module like `MCPKit` that holds several classes returns those class names correctly), but returns an empty result for a plain module or class whose only children are methods/properties/constants (e.g. a module with just a `Load` method) — with no error to distinguish that from "this location has no members." There is no reliable way to enumerate a module's methods via IDE tools; read the `.xojo_code` file directly instead.
+
+### `get_current_location` only reflects code-level selections, not module/class rows
+
+The underlying IDE scripting function `Location` (and therefore `get_current_location`, plus `list_project_items` / `get_code` called with no `location` argument, which implicitly use it) updates correctly when the user clicks a **code-level item** in the Navigator — a method, property, or event implementation.
+
+It does **not** update when the user clicks a **module or class row itself** in the Navigator — `Location` keeps reporting the last code-level item that was open inside it instead. The IDE scripting API has no concept of "a module is selected," only "the last code item that was open."
+
+**How to apply:** Don't rely on `get_current_location` (or the no-argument form of other tools) to infer what the user is currently looking at, unless you already know they're focused on a specific method/property/event rather than browsing at the module/class level. When in doubt, ask the user, or use an explicit `location` argument instead of relying on IDE-side "current" state.
+
+### `get_item_description` — real scope limit: code-level items only
+
+`ItemDescription` in the IDE scripting language only applies to code-level items — methods, properties, constants, events. Setting it on a **module or class itself** (e.g. a bare module or class name) silently does nothing: no error, but the value is never readable afterward and is never written to disk, because Xojo's `.xojo_code` format has no `Description=` slot on the class/module header itself. Setting it on a method/property/constant/event works correctly and persists to disk (as a hex-encoded `Description=` attribute on that item's `#tag` line) once `save_project` is called.
+
+**How to apply:** only use `get_item_description`'s `value` parameter on a method/property/constant/event location, not a bare class or module name — the module case reports `"OK"` without actually doing anything.
+
+**Note:** `save_project` can rewrite more of a `.xojo_code` file than the one property being changed — it may normalize trailing whitespace and add the module's default `ViewBehavior` property block (Name/Index/Super/Left/Top) if that module didn't already have one on disk. This is normal Xojo IDE save behavior, not an XMCP bug, but it means a `save_project` call after an unrelated small edit can produce a larger git diff than expected.
+
+### `constant_value` — always use the fully-qualified name
+
+The IDE scripting assignment `ConstantValue(name) = value` never raises an error, even for a name that doesn't exist at all — it silently no-ops. A bare name (e.g. `kVersion`) never resolves, even with the containing module currently selected in the IDE — only the fully-qualified form (`Module.ConstantName`) works. `constant_value` reads the value back after a write and compares it, returning a proper error (`"Constant '...' was not found or the value did not take effect. Use the fully-qualified form Module.ConstantName."`) if the write didn't actually take effect, instead of a false `"OK"`.
+
+**How to apply:** always pass `Module.ConstantName` (or `App.kSomething`) to `constant_value` — never a bare constant name, even if the module is currently selected in the IDE.
 
 ### Documentation tools — use search_docs and lookup_class, not list_doc_topics
 

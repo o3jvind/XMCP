@@ -51,6 +51,11 @@ Inherits ConsoleApplication
 
 		          If Verbose Then System.DebugLog(Name + " received: " + inputLine)
 
+		          // Reset before parsing so a JSON parse failure reports id: null
+		          // per the JSON-RPC spec, instead of reusing the previous
+		          // request's id left over from the last successful iteration.
+		          RequestID = Nil
+
 		          Try
 		            Var request As New JSONItem(inputLine)
 

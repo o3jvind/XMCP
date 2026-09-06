@@ -190,13 +190,16 @@ Protected Class IDECommunicator
 		  /// Handles the common contract used by most tools:
 		  ///   - Nil response → Failure with LastErrorMessage (or timeout message)
 		  ///   - response.response as string starting with "ERROR:" → Failure
-		  ///   - response.response as string that parses as JSON with a `scriptError`
-		  ///     or `buildError` key → Failure
 		  ///   - response.response as any other string → Success(string)
 		  ///   - response.response as JSON object with `scriptError` or `buildError` key → Failure
 		  ///   - response.response as any other JSON object → Success(json.ToString)
-		  /// Tools that need to parse JSON results (e.g. DoCommand "RunApp") should
-		  /// keep calling SendAndReceive directly.
+		  /// None of RunScript's callers send scripts whose Print output is a
+		  /// buildError/scriptError-shaped JSON string (that only happens via
+		  /// DoCommand "RunApp"/"BuildApp", which bypass RunScript and call
+		  /// SendAndReceive directly) — so a string response is never re-parsed
+		  /// as JSON here. Doing so previously misclassified legitimate text
+		  /// content (e.g. a constant or description whose value happens to
+		  /// contain the literal text `{"buildError":...}`) as a Failure.
 
 		  Var response As JSONItem = SendAndReceive(script, timeoutMS)
 		  If response = Nil Then
@@ -214,21 +217,6 @@ Protected Class IDECommunicator
 		  Var respVar As Variant = response.Value("response")
 		  If respVar.Type = Variant.TypeString Then
 		    resp = respVar.StringValue
-		    // Some IDE responses carry a structured error JSON-encoded as a
-		    // string rather than as a nested object (e.g. DoCommand results).
-		    // Parse it if possible so scriptError/buildError still surface as
-		    // Failure instead of being passed through as Success.
-		    Try
-		      Var respStrJSON As New JSONItem(resp)
-		      If respStrJSON.HasKey("scriptError") Then
-		        Return MCPKit.ToolResult.Failure("IDE script error: " + resp)
-		      End If
-		      If respStrJSON.HasKey("buildError") Then
-		        Return MCPKit.ToolResult.Failure("IDE build error: " + resp)
-		      End If
-		    Catch e As JSONException
-		      // Not JSON — treat as a plain string response.
-		    End Try
 		  Else
 		    Var respJSON As JSONItem = response.Value("response")
 		    // The IDE returns structured failures as a JSON object with a
@@ -241,7 +229,14 @@ Protected Class IDECommunicator
 		    If respJSON.HasKey("buildError") Then
 		      Return MCPKit.ToolResult.Failure("IDE build error: " + respJSON.ToString)
 		    End If
-		    resp = respJSON.ToString
+		    // The IDE encodes a script that printed an empty string as an empty
+		    // JSON object ({}) rather than an empty string — normalize it back
+		    // so callers see "" instead of the misleading literal text "{}".
+		    If respJSON.Count = 0 Then
+		      resp = ""
+		    Else
+		      resp = respJSON.ToString
+		    End If
 		  End If
 
 		  If resp.BeginsWith("ERROR:") Then

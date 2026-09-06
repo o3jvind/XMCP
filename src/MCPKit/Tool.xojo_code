@@ -185,33 +185,44 @@ Protected Class Tool
 
 	#tag Method, Flags = &h1
 		Protected Function BuildStringVariableScript(variableName As String, value As String) As String
-		  Var lines() As String = value.Split(EndOfLine)
+		  // Split on CRLF/CR/LF individually (not just EndOfLine, which is LF-only
+		  // on macOS) so a raw CR embedded in `value` (e.g. from "a\r\nb" or "a\rb")
+		  // never ends up as a literal control byte inside a script string literal,
+		  // which would break the IDE script's syntax. Each segment is emitted as
+		  // its own quoted piece, joined by the exact separator it had — Chr(13),
+		  // Chr(10), or Chr(13)+Chr(10) as literal Chr() calls, not EndOfLine —
+		  // so CR/LF/CRLF are all preserved exactly as they were in the value.
+		  Var segments() As String
+		  Var separators() As String
+		  Var current As String = ""
+		  Var i As Integer = 0
+		  While i < value.Length
+		    Var ch As String = value.Middle(i, 1)
+		    If ch = Chr(13) And value.Middle(i + 1, 1) = Chr(10) Then
+		      segments.Add(current)
+		      separators.Add("Chr(13) + Chr(10)")
+		      current = ""
+		      i = i + 2
+		    ElseIf ch = Chr(13) Or ch = Chr(10) Then
+		      segments.Add(current)
+		      separators.Add("Chr(" + Str(ch.Asc) + ")")
+		      current = ""
+		      i = i + 1
+		    Else
+		      current = current + ch
+		      i = i + 1
+		    End If
+		  Wend
+		  segments.Add(current)
+
 		  Var scriptLines() As String
-
 		  scriptLines.Add("Dim " + variableName + " As String = """"")
-		  For Each line As String In lines
-		    scriptLines.Add(variableName + " = " + variableName + " + """ + line.ReplaceAll("""", """""") + """ + EndOfLine")
-		  Next line
-
-		  If Not HasTrailingEndOfLine(value) Then
-		    scriptLines.Add("Dim __eol As String = EndOfLine")
-		    scriptLines.Add("If " + variableName + ".Length >= __eol.Length Then")
-		    scriptLines.Add("  If " + variableName + ".Right(__eol.Length) = __eol Then")
-		    scriptLines.Add("    " + variableName + " = " + variableName + ".Left(" + variableName + ".Length - __eol.Length)")
-		    scriptLines.Add("  End If")
-		    scriptLines.Add("End If")
-		  End If
+		  For j As Integer = 0 To segments.LastIndex
+		    Var sep As String = If(j = 0, "", " + " + separators(j - 1))
+		    scriptLines.Add(variableName + " = " + variableName + sep + " + """ + segments(j).ReplaceAll("""", """""") + """")
+		  Next j
 
 		  Return String.FromArray(scriptLines, EndOfLine)
-
-		End Function
-	#tag EndMethod
-
-	#tag Method, Flags = &h1
-		Protected Function HasTrailingEndOfLine(value As String) As Boolean
-		  Var eol As String = EndOfLine
-		  If value.Length < eol.Length Then Return False
-		  Return value.Right(eol.Length) = eol
 
 		End Function
 	#tag EndMethod

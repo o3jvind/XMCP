@@ -6,7 +6,7 @@ Inherits MCPKit.Tool
 		  Super.Constructor("constant_value", "Gets or sets the value of a project constant in the Xojo IDE. The constant must already exist in the project.")
 
 		  Parameters.Add(New MCPKit.ToolParameter("name", MCPKit.ToolParameterTypes.String_, _
-		  "The constant name. Can be a simple name (e.g. 'kVersion') or fully qualified (e.g. 'App.kVersion').", _
+		  "The fully-qualified constant name (e.g. 'App.kVersion'). A bare name (e.g. 'kVersion') silently fails in the Xojo IDE scripting API — always qualify with the containing module or class.", _
 		  False, "", True))
 
 		  Parameters.Add(New MCPKit.ToolParameter("value", MCPKit.ToolParameterTypes.String_, _
@@ -41,8 +41,20 @@ Inherits MCPKit.Tool
 
 		  Var script As String
 		  If hasValue Then
-		    script = "ConstantValue(""" + name.ReplaceAll("""", """""") + """) = """ + value.ReplaceAll("""", """""") + """" + EndOfLine + _
-		    "Print ""OK"""
+		    ' Xojo's IDE-scripting ConstantValue() assignment never raises an error —
+		    ' it silently no-ops for an unknown or unqualified name. Read the value
+		    ' back and compare so a no-op assignment is reported as a failure
+		    ' instead of a false "OK".
+		    ' Build the value via a String variable (not inline between literal
+		    ' quotes) so a value containing a newline doesn't break the script
+		    ' across lines.
+		    script = BuildStringVariableScript("__value", value) + EndOfLine + _
+		    "ConstantValue(""" + name.ReplaceAll("""", """""") + """) = __value" + EndOfLine + _
+		    "If ConstantValue(""" + name.ReplaceAll("""", """""") + """) = __value Then" + EndOfLine + _
+		    "  Print ""OK""" + EndOfLine + _
+		    "Else" + EndOfLine + _
+		    "  Print ""ERROR: Constant '" + name.ReplaceAll("""", """""") + "' was not found or the value did not take effect. Use the fully-qualified form Module.ConstantName.""" + EndOfLine + _
+		    "End If"
 		  Else
 		    script = "Print ConstantValue(""" + name.ReplaceAll("""", """""") + """)"
 		  End If
