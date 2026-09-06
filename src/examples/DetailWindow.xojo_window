@@ -7,7 +7,7 @@ Begin DesktopWindow DetailWindow
    FullScreen      =   False
    HasBackgroundColor=   False
    HasCloseButton  =   True
-   HasFullScreenButton=   True
+   HasFullScreenButton=   False
    HasMaximizeButton=   True
    HasMinimizeButton=   True
    HasTitleBar     =   True
@@ -16,84 +16,15 @@ Begin DesktopWindow DetailWindow
    MacProcID       =   0
    MaximumHeight   =   32000
    MaximumWidth    =   32000
-   MenuBar         =   0
+   MenuBar         =   ""
    MenuBarVisible  =   False
-   MinimumHeight   =   200
-   MinimumWidth    =   300
+   MinimumHeight   =   64
+   MinimumWidth    =   64
    Resizeable      =   True
-   Title           =   "Detail"
+   Title           =   "Untitled"
    Type            =   0
    Visible         =   True
-   Width           =   500
-   Begin DesktopLabel TitleLabel
-      AllowAutoDeactivate=   True
-      Bold            =   True
-      Enabled         =   True
-      FontName        =   "System"
-      FontSize        =   0.0
-      FontUnit        =   0
-      Height          =   24
-      Index           =   -2147483648
-      InitialParent   =   ""
-      Italic          =   False
-      Left            =   16
-      LockBottom      =   False
-      LockedInPosition=   False
-      LockLeft        =   True
-      LockRight       =   True
-      LockTop         =   True
-      Multiline       =   False
-      Scope           =   2
-      Selectable      =   False
-      TabIndex        =   0
-      TabPanelIndex   =   0
-      TabStop         =   False
-      Text            =   "Title"
-      TextAlignment   =   0
-      TextColor       =   &c000000
-      Tooltip         =   ""
-      Top             =   16
-      Transparent     =   False
-      Underline       =   False
-      Visible         =   True
-      Width           =   468
-   End
-   Begin DesktopTextArea BodyArea
-      AllowAutoDeactivate=   True
-      AllowFocusRing  =   True
-      AllowSpellChecking=   True
-      AllowStyledText =   False
-      AllowTabs       =   False
-      Bold            =   False
-      Enabled         =   True
-      FontName        =   "System"
-      FontSize        =   0.0
-      FontUnit        =   0
-      Height          =   280
-      HideSelection   =   True
-      Index           =   -2147483648
-      InitialParent   =   ""
-      Italic          =   False
-      Left            =   16
-      LockBottom      =   True
-      LockedInPosition=   False
-      LockLeft        =   True
-      LockRight       =   True
-      LockTop         =   True
-      ReadOnly        =   False
-      Scope           =   2
-      ScrollbarHorizontal=   False
-      ScrollBarVertical=   True
-      TabIndex        =   1
-      TabPanelIndex   =   0
-      TabStop         =   True
-      Text            =   ""
-      Top             =   52
-      Transparent     =   False
-      Underline       =   False
-      Visible         =   True
-      Width           =   468
-   End
+   Width           =   600
    Begin DesktopButton SaveButton
       AllowAutoDeactivate=   True
       Bold            =   False
@@ -104,19 +35,18 @@ Begin DesktopWindow DetailWindow
       FontName        =   "System"
       FontSize        =   0.0
       FontUnit        =   0
-      Height          =   24
+      Height          =   20
       Index           =   -2147483648
-      InitialParent   =   ""
       Italic          =   False
-      Left            =   400
+      Left            =   408
       LockBottom      =   True
       LockedInPosition=   False
       LockLeft        =   False
       LockRight       =   True
       LockTop         =   False
       MacButtonStyle  =   0
-      Scope           =   2
-      TabIndex        =   2
+      Scope           =   0
+      TabIndex        =   0
       TabPanelIndex   =   0
       TabStop         =   True
       Tooltip         =   ""
@@ -136,19 +66,18 @@ Begin DesktopWindow DetailWindow
       FontName        =   "System"
       FontSize        =   0.0
       FontUnit        =   0
-      Height          =   24
+      Height          =   20
       Index           =   -2147483648
-      InitialParent   =   ""
       Italic          =   False
-      Left            =   308
+      Left            =   500
       LockBottom      =   True
       LockedInPosition=   False
       LockLeft        =   False
       LockRight       =   True
       LockTop         =   False
       MacButtonStyle  =   0
-      Scope           =   2
-      TabIndex        =   3
+      Scope           =   0
+      TabIndex        =   1
       TabPanelIndex   =   0
       TabStop         =   True
       Tooltip         =   ""
@@ -158,10 +87,95 @@ Begin DesktopWindow DetailWindow
       Visible         =   True
       Width           =   80
    End
+   Begin DesktopLabel TitleLabel
+      AllowAutoDeactivate=   True
+      Bold            =   False
+      Enabled         =   True
+      FontName        =   "System"
+      FontSize        =   0.0
+      FontUnit        =   0
+      Height          =   20
+      Index           =   -2147483648
+      Italic          =   False
+      Left            =   20
+      LockBottom      =   False
+      LockedInPosition=   False
+      LockLeft        =   True
+      LockRight       =   True
+      LockTop         =   True
+      Multiline       =   False
+      Scope           =   0
+      Selectable      =   False
+      TabIndex        =   2
+      TabPanelIndex   =   0
+      TabStop         =   True
+      Text            =   "Title"
+      TextAlignment   =   0
+      TextColor       =   &c000000
+      Tooltip         =   ""
+      Top             =   20
+      Transparent     =   False
+      Underline       =   False
+      Visible         =   True
+      Width           =   100
+   End
+   Begin DesktopTextArea BodyArea
+      AllowAutoDeactivate=   True
+      AllowFocusRing  =   True
+      AllowSpellChecking=   True
+      AllowStyledText =   True
+      AllowTabs       =   False
+      BackgroundColor =   &cFFFFFF
+      Bold            =   False
+      Enabled         =   True
+      FontName        =   "System"
+      FontSize        =   0.0
+      FontUnit        =   0
+      Format          =   ""
+      HasBorder       =   True
+      HasHorizontalScrollbar=   False
+      HasVerticalScrollbar=   True
+      Height          =   296
+      HideSelection   =   True
+      Index           =   -2147483648
+      Italic          =   False
+      Left            =   20
+      LineHeight      =   0.0
+      LineSpacing     =   1.0
+      LockBottom      =   True
+      LockedInPosition=   False
+      LockLeft        =   True
+      LockRight       =   True
+      LockTop         =   True
+      MaximumCharactersAllowed=   0
+      Multiline       =   True
+      ReadOnly        =   False
+      Scope           =   0
+      TabIndex        =   3
+      TabPanelIndex   =   0
+      TabStop         =   True
+      Text            =   ""
+      TextAlignment   =   0
+      TextColor       =   &c000000
+      Tooltip         =   ""
+      Top             =   52
+      Transparent     =   False
+      Underline       =   False
+      UnicodeMode     =   1
+      ValidationMask  =   ""
+      Visible         =   True
+      Width           =   560
+   End
 End
 #tag EndDesktopWindow
 
 #tag WindowCode
+	#tag Event
+		Sub Closing()
+		  // Window is closing — clean up if needed.
+		End Sub
+	#tag EndEvent
+
 	#tag Event
 		Sub Opening()
 		  // Window is opening — called after controls are initialised.
@@ -169,17 +183,6 @@ End
 		End Sub
 	#tag EndEvent
 
-	#tag Event
-		Sub Close()
-		  // Window is closing — clean up if needed.
-		End Sub
-	#tag EndEvent
-
-	#tag Event
-		Sub Resized()
-		  LayoutControls()
-		End Sub
-	#tag EndEvent
 
 	#tag Method, Flags = &h0
 		Sub LoadItem(title As String, body As String)
@@ -198,31 +201,15 @@ End
 		End Sub
 	#tag EndMethod
 
-	#tag Method, Flags = &h21
-		Private Sub LayoutControls()
-		  TitleLabel.Left   = 16
-		  TitleLabel.Top    = 16
-		  TitleLabel.Width  = Me.Width - 32
 
-		  BodyArea.Left     = 16
-		  BodyArea.Top      = 52
-		  BodyArea.Width    = Me.Width - 32
-		  BodyArea.Height   = Me.Height - 52 - 48
-
-		  SaveButton.Top    = Me.Height - 32
-		  SaveButton.Left   = Me.Width - 96
-		  CancelButton.Top  = Me.Height - 32
-		  CancelButton.Left = Me.Width - 192
-		End Sub
-	#tag EndMethod
+	#tag Property, Flags = &h21
+		Private mBody As String
+	#tag EndProperty
 
 	#tag Property, Flags = &h21
 		Private mTitle As String
 	#tag EndProperty
 
-	#tag Property, Flags = &h21
-		Private mBody As String
-	#tag EndProperty
 
 #tag EndWindowCode
 
@@ -236,7 +223,6 @@ End
 		End Sub
 	#tag EndEvent
 #tag EndEvents
-
 #tag Events CancelButton
 	#tag Event
 		Sub Pressed()
@@ -244,54 +230,3 @@ End
 		End Sub
 	#tag EndEvent
 #tag EndEvents
-
-#tag ViewBehavior
-	#tag ViewProperty
-		Name="Name"
-		Visible=true
-		Group="ID"
-		InitialValue=""
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Interfaces"
-		Visible=true
-		Group="ID"
-		InitialValue=""
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Super"
-		Visible=true
-		Group="ID"
-		InitialValue=""
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Width"
-		Visible=true
-		Group="Size"
-		InitialValue="500"
-		Type="Integer"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Height"
-		Visible=true
-		Group="Size"
-		InitialValue="400"
-		Type="Integer"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Title"
-		Visible=true
-		Group="Frame"
-		InitialValue="Detail"
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-#tag EndViewBehavior

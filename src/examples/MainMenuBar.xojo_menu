@@ -7,25 +7,6 @@ Begin Menu MainMenuBar
       AutoEnabled = True
       AutoEnable = True
       Visible = True
-      Begin DesktopMenuItem FileOpen
-         SpecialMenu = 0
-         Index = -2147483648
-         Text = "&Open…"
-         ShortcutKey = "O"
-         Shortcut = "Cmd+O"
-         MenuModifier = True
-         AutoEnabled = True
-         AutoEnable = True
-         Visible = True
-      End
-      Begin DesktopMenuItem FileSeparator1
-         SpecialMenu = 0
-         Index = -2147483648
-         Text = "-"
-         AutoEnabled = True
-         AutoEnable = True
-         Visible = True
-      End
       Begin DesktopQuitMenuItem FileQuit
          SpecialMenu = 0
          Index = -2147483648
@@ -139,14 +120,6 @@ Begin Menu MainMenuBar
       AutoEnabled = True
       AutoEnable = True
       Visible = True
-      Begin DesktopMenuItem HelpAbout
-         SpecialMenu = 0
-         Index = -2147483648
-         Text = "About MyApp"
-         AutoEnabled = True
-         AutoEnable = True
-         Visible = True
-      End
    End
 End
 #tag EndMenu

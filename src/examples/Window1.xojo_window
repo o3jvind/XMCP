@@ -16,12 +16,12 @@ Begin DesktopWindow Window1
    MacProcID       =   0
    MaximumHeight   =   32000
    MaximumWidth    =   32000
-   MenuBar         =   0
+   MenuBar         =   317691903
    MenuBarVisible  =   False
    MinimumHeight   =   64
    MinimumWidth    =   64
    Resizeable      =   True
-   Title           =   "Window1"
+   Title           =   "Untitled"
    Type            =   0
    Visible         =   True
    Width           =   600
@@ -38,19 +38,19 @@ Begin DesktopWindow Window1
       Height          =   20
       Index           =   -2147483648
       Italic          =   False
-      Left            =   100
+      Left            =   20
       LockBottom      =   False
       LockedInPosition=   False
       LockLeft        =   True
       LockRight       =   False
       LockTop         =   True
       MacButtonStyle  =   0
-      Scope           =   2
+      Scope           =   0
       TabIndex        =   0
       TabPanelIndex   =   0
       TabStop         =   True
       Tooltip         =   ""
-      Top             =   100
+      Top             =   20
       Transparent     =   False
       Underline       =   False
       Visible         =   True
@@ -66,58 +66,68 @@ Begin DesktopWindow Window1
       Height          =   20
       Index           =   -2147483648
       Italic          =   False
-      Left            =   100
+      Left            =   112
       LockBottom      =   False
       LockedInPosition=   False
       LockLeft        =   True
       LockRight       =   False
       LockTop         =   True
-      Scope           =   2
+      Multiline       =   False
+      Scope           =   0
+      Selectable      =   False
       TabIndex        =   1
       TabPanelIndex   =   0
+      TabStop         =   True
       Text            =   "Hello"
-      Top             =   140
+      TextAlignment   =   0
+      TextColor       =   &c000000
+      Tooltip         =   ""
+      Top             =   20
       Transparent     =   False
       Underline       =   False
       Visible         =   True
-      Width           =   200
+      Width           =   100
    End
    Begin DesktopTextField TextField1
       AllowAutoDeactivate=   True
       AllowFocusRing  =   True
-      AllowSpellChecking=   True
+      AllowSpellChecking=   False
       AllowTabs       =   False
+      BackgroundColor =   &cFFFFFF
       Bold            =   False
       Enabled         =   True
       FontName        =   "System"
       FontSize        =   0.0
       FontUnit        =   0
       Format          =   ""
+      HasBorder       =   True
       Height          =   22
+      Hint            =   "Enter text"
       Index           =   -2147483648
       Italic          =   False
-      Left            =   100
+      Left            =   20
       LockBottom      =   False
       LockedInPosition=   False
       LockLeft        =   True
       LockRight       =   False
       LockTop         =   True
-      Mask            =   ""
-      MaximumCharacters=   0
-      Multiline       =   False
+      MaximumCharactersAllowed=   0
       Password        =   False
-      Placeholder     =   "Enter text"
       ReadOnly        =   False
-      Scope           =   2
+      Scope           =   0
       TabIndex        =   2
       TabPanelIndex   =   0
       TabStop         =   True
       Text            =   ""
-      Top             =   170
+      TextAlignment   =   0
+      TextColor       =   &c000000
+      Tooltip         =   ""
+      Top             =   52
       Transparent     =   False
       Underline       =   False
+      ValidationMask  =   ""
       Visible         =   True
-      Width           =   200
+      Width           =   192
    End
 End
 #tag EndDesktopWindow
@@ -130,17 +140,13 @@ End
 		End Sub
 	#tag EndEvent
 
-	#tag Event
-		Sub Close()
-		  // Window is closing
-		End Sub
-	#tag EndEvent
 
 	#tag Method, Flags = &h21
 		Private Sub UpdateLabel(text As String)
 		  Label1.Text = text
 		End Sub
 	#tag EndMethod
+
 
 #tag EndWindowCode
 
@@ -151,53 +157,3 @@ End
 		End Sub
 	#tag EndEvent
 #tag EndEvents
-#tag ViewBehavior
-	#tag ViewProperty
-		Name="Name"
-		Visible=true
-		Group="ID"
-		InitialValue=""
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Interfaces"
-		Visible=true
-		Group="ID"
-		InitialValue=""
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Super"
-		Visible=true
-		Group="ID"
-		InitialValue=""
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Width"
-		Visible=true
-		Group="Size"
-		InitialValue="600"
-		Type="Integer"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Height"
-		Visible=true
-		Group="Size"
-		InitialValue="400"
-		Type="Integer"
-		EditorType=""
-	#tag EndViewProperty
-	#tag ViewProperty
-		Name="Title"
-		Visible=true
-		Group="Frame"
-		InitialValue="Untitled"
-		Type="String"
-		EditorType=""
-	#tag EndViewProperty
-#tag EndViewBehavior

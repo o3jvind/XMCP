@@ -24,20 +24,20 @@ There are no automated tests or linting tools; validation happens through Xojo I
 ```
 MCP Client (stdin/stdout JSON-RPC)
     → MCPKit.ServerApplication  (request routing)
-        → Tool.Run()            (each of 25 tools)
+        → Tool.Run()            (each of 28 tools)
             → IDECommunicator   (IPCSocket to Xojo IDE)
                 → Xojo IDE      (executes IDE scripts, returns results)
 ```
 
 ### Key Components
 
-**`App.xojo_code`** — Entry point. Registers all 26 tools in `Configure()`, auto-detects the Xojo documentation path under `~/Library/Application Support/Xojo/`, initializes `IDECommunicator` and optionally `SemanticSearch`. The global `App.IDE` instance is used by all IDE tools; `App.SemanticSearch` is used by `SearchDocs` when available.
+**`App.xojo_code`** — Entry point. Registers all 28 tools in `Configure()`, auto-detects the Xojo documentation path under `~/Library/Application Support/Xojo/`, initializes `IDECommunicator` and optionally `SemanticSearch`. The global `App.IDE` instance is used by all IDE tools; `App.SemanticSearch` is used by `SearchDocs` when available.
 
 **`IDECommunicator.xojo_code`** — Handles all IDE socket communication. Uses IDE Communicator Protocol v2 over a Unix domain socket (`/tmp/XojoIDE` or `/private/tmp/XojoIDE`). Messages are NUL-terminated JSON. Sends a `{"protocol": 2}` handshake, then uses tag-based correlation for synchronous request/response. Default timeout is 10 seconds; builds use 120 seconds.
 
 **`MCPKit/`** — The MCP protocol framework (8 classes):
 - `ServerApplication` — JSON-RPC stdin/stdout loop, tool dispatch, and MCP resources handling (`resources/list` / `resources/read`)
-- `Tool` — Base class all 25 tools inherit from; includes `BuildStringVariableScript(varName, value)` helper for safely passing multiline strings into IDE scripts
+- `Tool` — Base class all tools inherit from; includes `BuildStringVariableScript(varName, value)` helper for safely passing multiline strings into IDE scripts
 - `ToolParameter`, `ToolArgument`, `ToolResult` — Parameter/result types
 - `OptionParser`, `Option`, `OptionException` — CLI argument parsing
 
@@ -45,11 +45,12 @@ MCP Client (stdin/stdout JSON-RPC)
 
 **`SemanticSearch.xojo_code`** — RAG search provider with two tiers: `Available()` (semantic — DB + embedding server on `http://localhost:8089`, probed once at startup with a 2 s timeout) and `HasDatabase()` (keyword/BM25 — DB only, via `KeywordSearch`). Also serves `SearchNotesKeyword` for the `search_notes` tool and validates `metadata.embedding_dim` (≠768 disables the semantic tier). DB discovery order (in `App.Configure`): `--db-path` → `~/Library/Application Support/dk.o3jvind.xdox/xdox.db` (the XDOX app's canonical DB — the hardcoded bundle id is deliberate) → legacy `DocsPath/xojo_rag.db`. `App.SemanticSearch` is `Nil` only when no DB exists at all. Uses async `URLConnection` + `DoEvents` loop, `SQLiteDatabase`, and cosine similarity over float32 blobs.
 
-**`Tools/`** — 25 tool implementations, each inheriting `MCPKit.Tool` and implementing `Run(args() As MCPKit.ToolArgument) As MCPKit.ToolResult`:
+**`Tools/`** — 28 tool implementations, each inheriting `MCPKit.Tool` and implementing `Run(args() As MCPKit.ToolArgument) As MCPKit.ToolResult`:
 - **19 IDE tools**: list/navigate/read/write project items, build, run, stop, save, analyze, debug control, create items, run IDE scripts, get project info, revert, get/set item description, get/set constant value, get/set selected text
 - **3 documentation tools**: search docs (guides/tutorials), lookup class (API reference), list topics (operate on cached `llms-full.txt` / `llms.txt`)
 - **2 debug tools**: `GetDebugLog` (reads `/tmp/xmcp_debug.log`), `GetSystemLog` (reads macOS unified log via `Shell`)
 - **1 cost tool**: `EstimateRequestCost` (static heuristics, no IDE call)
+- **2 disk-file generation/validation tools** (no IDE call, work even when the IDE is closed): `ScaffoldCodeBlock` generates a correctly formatted `#tag` block (Method/Property/Constant/Event/Shared method/control event/window event) for the caller to insert directly; `LintProjectFile` validates a `.xojo_code`/`.xojo_window` file on disk for the four known failure modes (block ordering, Flags/keyword mismatches, unclosed/mismatched `#tag` pairs, Constant `Default` escaping). Both read their format rules from a machine-readable JSON block embedded in `usage-guide.md` via `FormatRules.Load()` (shared module, `src/FormatRules.xojo_code`) — editing that JSON changes both tools' behavior with no rebuild, only a `usage-guide.md` file copy next to the running binary.
 
 ### Semantic search
 
@@ -125,10 +126,12 @@ The `BuildApp(buildType, reveal)` function form exists for IDE scripts that need
 
 - **macOS only** — socket paths, documentation paths, and the Xojo IDE are macOS-specific.
 - **Xojo IDE must be open** with a project loaded for IDE tools to work.
-- To test changes, rebuild with Xojo IDE, then restart the MCP client session.
+- To test changes, rebuild with Xojo IDE, then restart the MCP client session. **A full restart is required, not just a client-side reconnect** — a stale XMCP process keeps running and serving old tool logic even after the MCP client reconnects; kill the process (`pgrep -fl XMCP`, `kill <PID>`) before the client starts a fresh one. Also verify which project is actually open (`get_project_info`) before calling `build_project` — the IDE may have a different project open (e.g. `src/examples/Examples.xojo_project`) than the one you intend to rebuild.
 - Source files are `.xojo_code` (plain text, one class/module per file) and `.xojo_project` (key/value text format project manifest). These can be edited as plain text or through the IDE.
 - Verbose logging to stderr can be enabled with the `-v/--verbose` CLI flag.
 - Documentation is auto-detected from versioned paths; the `--docs-path` flag overrides this.
+- **`String.BeginsWith` and `String.IndexOf` are case-INSENSITIVE by default** in this Xojo version (`ComparisonOptions.CaseInsensitive` is the default parameter value) — this bit `LintProjectFile`'s `#tag` scanning in practice: Xojo writes an unrelated `#Tag Instance, Platform = ...` sub-line (capital T) inside a `#tag Constant` block for per-platform Default value overrides, and a case-insensitive `BeginsWith("#tag ")` matched it, permanently desyncing the tag-balance stack. Pass `ComparisonOptions.CaseSensitive` explicitly whenever comparing against a `#tag`-format literal.
+- **The bare `Tab` identifier is not valid in a Console Application target** and produces a cascade of confusing, unrelated-looking compile errors ("item does not exist", "Expected Int32, but got TextLiteral") anchored at the line using it — not an error pointing at `Tab` itself. Use `Chr(9)` instead. Confirmed by bisecting a method down to a stub and reintroducing code line-by-line with `analyze_project scope=item` after each addition.
 
 ## Direct File Editing (primary approach)
 
@@ -147,7 +150,7 @@ Edit source files directly on disk and use `revert_project` to reload. This is t
 - `src/<WindowName>.xojo_window` — window UI, controls, and event handlers
 - `src/XMCP.xojo_project` — project manifest (key/value text format)
 - `src/usage-guide.md` — the MCP resource distributed next to the binary
-- `src/examples/` — reference templates for common Xojo file structures (`App.xojo_code`, `Module1.xojo_code`, `MyClass.xojo_code`, `MyButton.xojo_code`, `Window1.xojo_window`); copy from these when creating new project files
+- `src/examples/` — reference templates for common Xojo file structures (`App.xojo_code`, `Module1.xojo_code`, `MyClass.xojo_code`, `MyButton.xojo_code`, `Window1.xojo_window`, `DetailWindow.xojo_window`, `MainMenuBar.xojo_menu`); copy from these when creating new project files. **This directory is itself a real, buildable Xojo project** (`src/examples/Examples.xojo_project`, Desktop type) — every file in it is IDE-generated and IDE-validated, not just hand-written text. Open `Examples.xojo_project` in Xojo IDE (separately from `XMCP.xojo_project`) to Analyze/Build it after editing any example file, so a mistake in a reference template is caught by the compiler instead of silently shipping to every future AI session that copies from it. (Two real, silent bugs were found and fixed this way on 2026-09-05: `App.xojo_code`'s `Inherits Application` was deprecated API 1 — fixed to `Inherits DesktopApplication`; and hand-written Constant `Default` values with an unescaped opening quote compiled fine but silently dropped the value's first character at runtime.)
 
 ## usage-guide.md
 

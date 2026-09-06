@@ -35,7 +35,7 @@ Inherits MCPKit.ServerApplication
 		  Else
 		    If Verbose Then System.DebugLog("WARNING: Xojo documentation not found. Doc tools will be unavailable.")
 		  End If
-
+		  
 		  // Locate the RAG database (Task 13). Search order:
 		  //   1. --db-path (explicit override)
 		  //   2. XDOX's canonical DB — XDOX is the user-friendly indexer app that
@@ -64,7 +64,7 @@ Inherits MCPKit.ServerApplication
 		    // restarting the MCP server.
 		    ragDB = xdoxDB
 		  End If
-
+		  
 		  // The DB alone enables keyword (BM25) search; a running embedding server
 		  // (XDOX manages one on port 8089) upgrades it to hybrid semantic search.
 		  // A running reranker (XDOX manages one on port 8093) further improves
@@ -92,7 +92,7 @@ Inherits MCPKit.ServerApplication
 		    SemanticSearch = Nil
 		    System.DebugLog("WARNING: RAG search disabled during startup: " + e.Message)
 		  End Try
-
+		  
 		  // Register all MCP tools.
 		  RegisterTools( _
 		  New ListProjectItems, _
@@ -120,10 +120,12 @@ Inherits MCPKit.ServerApplication
 		  New GetSystemLog, _
 		  New SaveProject, _
 		  New AnalyzeProject, _
-		  New DebugControl _
+		  New DebugControl, _
+		  New ScaffoldCodeBlock, _
+		  New LintProjectFile _
 		  )
-
-		  If Verbose Then System.DebugLog("XMCP server configured with 26 tools.")
+		  
+		  If Verbose Then System.DebugLog("XMCP server configured with 28 tools.")
 		  
 		End Sub
 	#tag EndEvent
@@ -133,7 +135,7 @@ Inherits MCPKit.ServerApplication
 		  If CommandLineParser.HelpRequested Then
 		    CommandLineParser.ShowHelp("Options")
 		    Print("")
-		    Print("MCP Tools (26):")
+		    Print("MCP Tools (28):")
 		    Print("")
 		    Print("  IDE Tools:")
 		    Print("  list_project_items   List child items at a project location")
@@ -155,6 +157,8 @@ Inherits MCPKit.ServerApplication
 		    Print("  save_project         Save the project to disk")
 		    Print("  analyze_project      Analyze project for errors and warnings")
 		    Print("  debug_control        Step, resume, or pause an active debug session")
+		    Print("  scaffold_code_block  Generate a correctly formatted #tag block to insert")
+		    Print("  lint_project_file    Validate a .xojo_code/.xojo_window file for known errors")
 		    Print("")
 		    Print("  Documentation Tools:")
 		    Print("  search_docs          Search Xojo documentation (semantic/keyword)")
@@ -287,6 +291,7 @@ Inherits MCPKit.ServerApplication
 		  
 		End Function
 	#tag EndMethod
+
 
 	#tag Property, Flags = &h0, Description = 5061746820746F20586F6A6F20646F63756D656E746174696F6E206469726563746F72792E
 		DocsPath As FolderItem

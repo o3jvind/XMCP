@@ -20,7 +20,7 @@ This file is automatically loaded as an MCP resource when you connect to XMCP. I
 
 ## What XMCP can do
 
-XMCP gives you direct control over the Xojo IDE via 25 tools:
+XMCP gives you direct control over the Xojo IDE via 28 tools:
 
 - **Navigate**: `list_project_items`, `get_current_location`, `select_project_item`
 - **Read/write code**: `get_code`, `set_code`, `get_selected_text`, `set_selected_text`
@@ -29,6 +29,7 @@ XMCP gives you direct control over the Xojo IDE via 25 tools:
 - **Debug sessions**: `debug_control`
 - **Create items**: `create_project_item`
 - **Inspect and modify**: `get_item_description`, `constant_value`, `get_project_info`, `revert_project`
+- **Generate and validate disk edits**: `scaffold_code_block` (generate a correctly formatted `#tag` block), `lint_project_file` (validate a `.xojo_code`/`.xojo_window` file for known structural errors)
 - **IDE scripting**: `run_ide_script` (escape hatch for anything not covered)
 - **Documentation**: `search_docs`, `lookup_class`, `list_doc_topics`
 - **Debugging**: `get_debug_log`, `get_system_log`
@@ -100,7 +101,13 @@ Once in place, use `get_debug_log` after a crash **in a built app** to retrieve 
 
 **Always edit source files directly on disk** — for both `.xojo_code` and `.xojo_window` files. This is the primary editing path, not a fallback.
 
-The workflow is exactly two steps:
+The recommended workflow, when adding a new `#tag` block (a method, property, constant, event, or event handler):
+1. Call `scaffold_code_block` to generate the correctly formatted block instead of hand-writing `#tag` syntax from memory — it produces the right `Flags`/keyword pairing and `.xojo_window` escaping automatically.
+2. Insert the generated block into the file on disk (using your client's own `Edit`/`Write` tools).
+3. Call `lint_project_file` on the file as a safety net — it catches the four known failure modes (wrong block ordering, `Flags`/keyword mismatches, unclosed `#tag` pairs, `.xojo_window` escape errors), including ones introduced by freehand edits `scaffold_code_block` wasn't used for.
+4. Call `revert_project` to reload the file in the IDE.
+
+For edits that only touch code *inside* an existing method body (no new `#tag` blocks), steps 1 and 3 are optional — `scaffold_code_block` has nothing to generate, but running `lint_project_file` afterward is still cheap insurance if you're at all unsure the edit preserved the surrounding tag structure. The minimal workflow is still available:
 1. Edit the file on disk (using your client's own `Edit`/`Write` tools)
 2. Call `revert_project` to reload it in the IDE
 
@@ -114,7 +121,7 @@ The only exception is when the user explicitly asks you to read or edit code the
 
 ## Direct file editing — how to do it
 
-Reference examples of all common file structures are in the `examples/` folder next to this file. Use them as templates when creating or editing `.xojo_code` and `.xojo_window` files.
+Reference examples of all common file structures are in the `examples/` folder next to this file. Use them as templates when creating or editing `.xojo_code` and `.xojo_window` files. If you are editing one of these example files itself (not just copying from it), open `examples/Examples.xojo_project` in Xojo IDE and run Analyze/Build on it afterward — the examples are a real, buildable Desktop project, so a mistake there is caught by the compiler instead of silently being copied into every future session's code.
 
 | File type | Used for | Example |
 | --- | --- | --- |
@@ -186,15 +193,15 @@ Blocks **must** appear in this order or Xojo will reject or silently corrupt the
 2. `#tag Method` blocks (Constructor first by convention, then others)
 3. `#tag Property` blocks
 4. `#tag Constant` blocks
-5. `#tag Note` blocks
-6. `#tag ViewBehavior` — **always last, never add anything after it**
+5. `#tag ViewBehavior` — **always last, never add anything after it**
 
 **Module file** (same as class but no `#tag Event`):
 1. `#tag Method` blocks
 2. `#tag Constant` blocks
 3. `#tag Property` blocks
-4. `#tag Note` blocks
-5. `#tag ViewBehavior` — **always last**
+4. `#tag ViewBehavior` — **always last**
+
+**`#tag Note` blocks are exempt from this ordering** — confirmed by direct testing in the Xojo IDE, `#tag Note` compiles successfully anywhere after the opening `#tag Method`/`#tag Class`/`#tag Module` line (e.g. `OptionParser.xojo_code` in this codebase places `Note` blocks between `Method` and `Property`). Only avoid placing a `Note` after `#tag ViewBehavior`, which must still always be last.
 
 **Window file:**
 1. `#tag DesktopWindow` … `#tag EndDesktopWindow` (control layout block)
@@ -254,16 +261,17 @@ Called as `MyClass.Create("foo")` — no instance needed.
 
 ### Custom event definitions
 
-A `#tag Event` block inside a **class body** (not a window) *defines* an event the class can fire. It contains only the signature — no body:
+A `#tag Hook` block inside a **class body** *defines* a new event the class can fire — confirmed by direct IDE testing (2026-09-06, `examples/MyClass.xojo_code`). It contains only the signature — no body:
 
 ```xojo
-#tag Event, Description = "Fired when the count changes."
-    Sub CountChanged(newCount As Integer)
-    End Sub
-#tag EndEvent
+#tag Hook, Flags = &h0
+    Event CountChanged(newCount As Integer)
+#tag EndHook
 ```
 
-Raise it from within the class with `RaiseEvent CountChanged(mCount)`. Consumers implement the handler via `AddEventImplementation` in the IDE, or by editing the `.xojo_window` file directly.
+**`#tag Event` (no `Hook`) is used only for overriding an event the class already inherits** — e.g. a `DesktopButton` subclass overriding its inherited `Pressed` event (see `examples/MyButton.xojo_code`). Writing a hand-authored `#tag Event, Description = "..."` block to *define* a brand-new custom event (rather than override an inherited one) does not match what the IDE itself generates — use `#tag Hook` for that case instead.
+
+Raise a custom event from within the class with `RaiseEvent CountChanged(mCount)`. Consumers implement the handler via `AddEventImplementation` in the IDE, or by editing the `.xojo_window` file directly.
 
 ### Non-singleton windows (`ImplicitInstance = False`)
 
@@ -290,27 +298,64 @@ The `DetailWindow.xojo_window` example in `examples/` demonstrates this pattern 
 #tag EndNote
 ```
 
-### String constants in `.xojo_window` files
+### String constants in `.xojo_code` and `.xojo_window` files
 
-Constants in `.xojo_window` files use a different escape format than `.xojo_code` files. The IDE encodes the `Default` value like this:
+**Both** file types use the same escaping for `,` / `=` / `'` / non-ASCII characters in a Constant's `Default` value — confirmed empirically (2026-09-05) by round-tripping test values through `constant_value` on a real `.xojo_code` file and reading the resulting bytes on disk. The two file types differ only in how they escape the double quote character.
 
-| Character | `.xojo_window` encoding |
+| Character | `.xojo_code` and `.xojo_window` encoding |
 | --- | --- |
-| `"` (double quote) | `\"` |
 | `'` (single quote) | `\'` |
 | `=` | `\x3D` |
 | `,` (comma) | `\x2C` |
 | newline | `\n` |
 | Non-ASCII (e.g. `°`) | UTF-8 bytes e.g. `\xC2\xB0` — **not** `\uXXXX` |
 
-Note: `.xojo_code` files use `""` for embedded double quotes — the `\x3D`/`\x2C`/`\'` rules **only** apply to `.xojo_window`.
+**Double quote (`"`) — the two file types differ:**
 
-**Never write HTML, JavaScript, or any string containing commas or single quotes directly into a constant `Default` value in a `.xojo_window` file on disk.** Missed characters silently truncate the value with no error.
+- **`.xojo_window`**: every `"` in the value is escaped as `\"`.
+- **`.xojo_code`**: every `"` in the value is escaped as `\"`, **except the very last `"` character on the line**, which is left raw (`"`) because it is what the parser uses to find the end of the `Default = "..."` field. This holds regardless of where that quote falls in the text — even a value that is a single `"` character encodes as `Default = \"\""` (the first `\"` opens the field, the second bare `"` closes it). A value with quotes only in the middle, e.g. `a"b`, encodes as `Default = \"a\"b"` — the middle quote is escaped, the trailing one is not.
+
+Note: this differs from the isolated, in-method string literal escaping in `.xojo_code` (`""` for an embedded quote inside ordinary code, e.g. `"He said ""hi"""`) — that ordinary-code rule is unrelated to and does not apply to a `#tag Constant` line's `Default` field.
+
+**Fully plain values are written with NO escaping at all, including the opening quote itself** — the IDE only escapes the opening quote when something later in the value requires escaping. `Default = "MyApp"` (a value with no special characters) is written exactly like that, with a raw opening quote and no backslash anywhere on the line. Confirmed directly in the Xojo IDE: this compiles and builds with **no error whatsoever**, but Xojo silently drops the value's first character when the constant is read back — `Default = "MyApp"` round-trips as `"yApp"`, not `"MyApp"`. This is a real, silent data-corruption bug distinct from the truncation bugs below, and it cannot be told apart from a legitimately unescaped plain value just by reading the file — the only fix is to re-enter the value through the IDE's own constant editor (which will then escape it correctly, or leave it alone if it's genuinely safe).
+
+**Never write HTML, JavaScript, or any string containing commas, quotes, or single quotes directly into a constant `Default` value in a `.xojo_code` or `.xojo_window` file on disk.** Missed characters silently truncate the value with no error — this is a project-file-level `#tag Constant` parsing limitation, not limited to `.xojo_window` as earlier assumed.
 
 Use one of these approaches instead:
 
 1. **Paste via the IDE** — enter the raw value in the constant's Default Value field in the Xojo IDE, let the IDE escape it, then save (Cmd+S).
 2. **Build at runtime** — assemble the string in a Xojo method using string concatenation. This avoids escaping entirely and is more readable.
+
+### Format Rules (machine-readable — do not restructure this block)
+
+The rules above (block ordering, Flags/keyword mapping, `.xojo_window` escaping) are also encoded here as JSON. `scaffold_code_block` and `lint_project_file` both parse this exact block at runtime — it is their single source of truth, kept next to the prose explanation so a person only edits one place. If Xojo's own format ever changes, or a new edge case is found in practice (like the ones logged in XDOX's project notes — e.g. a literal comma also truncating `.xojo_code` constant defaults, not just `.xojo_window` ones), update the JSON here; both tools pick it up on their next call, no rebuild required.
+
+Keep the fenced block valid JSON. Do not remove keys the tools rely on without updating both tools to match.
+
+```json
+{
+  "flags": {
+    "&h0": {"keyword": "", "visibility": "public"},
+    "&h1": {"keyword": "Protected", "visibility": "protected"},
+    "&h21": {"keyword": "Private", "visibility": "private"}
+  },
+  "block_order": {
+    "xojo_code_class": ["Event", "Method", "Property", "Constant", "ViewBehavior"],
+    "xojo_code_module": ["Method", "Constant", "Property", "ViewBehavior"],
+    "xojo_window": ["DesktopWindow", "WindowCode", "Events", "ViewBehavior"]
+  },
+  "constant_escape": {
+    "'": "\\'",
+    "=": "\\x3D",
+    ",": "\\x2C"
+  },
+  "constant_quote_rule": {
+    "xojo_window": "all quotes escaped as \\\"",
+    "xojo_code": "all quotes escaped as \\\" except the last quote character on the line, which stays raw \""
+  },
+  "constant_types": ["String", "Integer", "Double", "Boolean", "Color"]
+}
+```
 
 ---
 

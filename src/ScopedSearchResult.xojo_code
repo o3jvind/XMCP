@@ -12,31 +12,7 @@ Private Class ScopedSearchResult
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
-		Titles() As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h0
-		Texts() As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h0
-		Sources() As String
-	#tag EndProperty
-
-	#tag Property, Flags = &h0
 		ChunkIndexes() As Integer
-	#tag EndProperty
-
-	#tag Property, Flags = &h0
-		PrevIDs() As Integer
-	#tag EndProperty
-
-	#tag Property, Flags = &h0
-		NextIDs() As Integer
-	#tag EndProperty
-
-	#tag Property, Flags = &h0
-		CosScores() As Double
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
@@ -44,7 +20,15 @@ Private Class ScopedSearchResult
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
+		CosScores() As Double
+	#tag EndProperty
+
+	#tag Property, Flags = &h0
 		FinalIdxs() As Integer
+	#tag EndProperty
+
+	#tag Property, Flags = &h0
+		NextIDs() As Integer
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
@@ -53,6 +37,23 @@ Private Class ScopedSearchResult
 		// forced into FinalIdxs by the Overview-guarantee. 0 if none.
 		OverviewChunkID As Integer = 0
 	#tag EndProperty
+
+	#tag Property, Flags = &h0
+		PrevIDs() As Integer
+	#tag EndProperty
+
+	#tag Property, Flags = &h0
+		Sources() As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h0
+		Texts() As String
+	#tag EndProperty
+
+	#tag Property, Flags = &h0
+		Titles() As String
+	#tag EndProperty
+
 
 End Class
 #tag EndClass
