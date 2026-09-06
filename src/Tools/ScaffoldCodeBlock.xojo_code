@@ -161,11 +161,11 @@ Inherits MCPKit.Tool
 		    t + "#tag EndConstant"
 
 		  Case "event_definition"
+		    Var eventSig As String = If(eventOrSignature <> "", eventOrSignature, "()")
 		    blockText = _
-		    t + "#tag Event, Description = " + q + itemName + " event." + q + EndOfLine + _
-		    t + t + "Sub " + itemName + eventOrSignature + EndOfLine + _
-		    t + t + "End Sub" + EndOfLine + _
-		    t + "#tag EndEvent"
+		    t + "#tag Hook, Flags = " + flagValue + EndOfLine + _
+		    t + t + keywordPrefix + "Event " + itemName + eventSig + EndOfLine + _
+		    t + "#tag EndHook"
 
 		  Case "control_event"
 		    Var sig As String = If(eventOrSignature <> "", eventOrSignature, "EventName()")

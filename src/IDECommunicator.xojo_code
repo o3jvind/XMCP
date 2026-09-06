@@ -89,8 +89,12 @@ Protected Class IDECommunicator
 		  /// Uses IPCSocket transport only.
 		  /// Returns the response JSON or Nil on timeout.
 		  ///
-		  /// Retries up to 3 times with a short pause if the socket is temporarily
-		  /// unavailable (e.g. after the Xojo IDE navigates to a new item).
+		  /// Retries up to kMaxRetries times with a short pause if the socket is
+		  /// temporarily unavailable (e.g. after the Xojo IDE navigates to a new
+		  /// item) and the failure happened before the script was written to the
+		  /// socket. Once the script has actually been sent, a subsequent failure
+		  /// (e.g. timeout waiting for the response) is NOT retried, since the IDE
+		  /// may have already executed it — resending could run it twice.
 
 		  LastErrorMessage = ""
 
@@ -117,13 +121,27 @@ Protected Class IDECommunicator
 		    Var socketErrors() As String
 		    For Each candidatePath As String In CandidateSocketPaths
 		      LogVerbose("IDE request " + tag + ": IPCSocket path " + candidatePath + " (attempt " + attempt.ToString + ")")
-		      Var responseViaSocket As JSONItem = SendAndReceiveViaIPCSocket(candidatePath, payload, tag, timeoutMS)
+		      Var scriptWasSent As Boolean
+		      Var responseViaSocket As JSONItem = SendAndReceiveViaIPCSocket(candidatePath, payload, tag, timeoutMS, scriptWasSent)
 		      If responseViaSocket <> Nil Then
 		        mConnected = True
 		        mSocketPath = candidatePath
 		        LastErrorMessage = ""
 		        LogVerbose("IDE request " + tag + ": success via IPCSocket (" + candidatePath + ").")
 		        Return responseViaSocket
+		      End If
+
+		      If scriptWasSent Then
+		        // The IDE may already have received and be executing this
+		        // script; we just never saw a matching response. Resending
+		        // the same script (possibly to the same underlying socket
+		        // via a different candidate path) could execute it twice.
+		        // Surface this as a distinct, non-retryable failure instead.
+		        LastErrorMessage = "IDE script was sent via " + candidatePath + " but no response was received within " + _
+		        timeoutMS.ToString + "ms. The script may have already executed — not retrying to avoid duplicate execution. " + _
+		        "Original error: " + LastErrorMessage
+		        LogVerbose("IDE request " + tag + ": " + LastErrorMessage)
+		        Return Nil
 		      End If
 
 		      If LastErrorMessage <> "" Then
@@ -172,8 +190,10 @@ Protected Class IDECommunicator
 		  /// Handles the common contract used by most tools:
 		  ///   - Nil response → Failure with LastErrorMessage (or timeout message)
 		  ///   - response.response as string starting with "ERROR:" → Failure
-		  ///   - response.response as string → Success(string)
-		  ///   - response.response as JSON object with `scriptError` key → Failure
+		  ///   - response.response as string that parses as JSON with a `scriptError`
+		  ///     or `buildError` key → Failure
+		  ///   - response.response as any other string → Success(string)
+		  ///   - response.response as JSON object with `scriptError` or `buildError` key → Failure
 		  ///   - response.response as any other JSON object → Success(json.ToString)
 		  /// Tools that need to parse JSON results (e.g. DoCommand "RunApp") should
 		  /// keep calling SendAndReceive directly.
@@ -194,13 +214,32 @@ Protected Class IDECommunicator
 		  Var respVar As Variant = response.Value("response")
 		  If respVar.Type = Variant.TypeString Then
 		    resp = respVar.StringValue
+		    // Some IDE responses carry a structured error JSON-encoded as a
+		    // string rather than as a nested object (e.g. DoCommand results).
+		    // Parse it if possible so scriptError/buildError still surface as
+		    // Failure instead of being passed through as Success.
+		    Try
+		      Var respStrJSON As New JSONItem(resp)
+		      If respStrJSON.HasKey("scriptError") Then
+		        Return MCPKit.ToolResult.Failure("IDE script error: " + resp)
+		      End If
+		      If respStrJSON.HasKey("buildError") Then
+		        Return MCPKit.ToolResult.Failure("IDE build error: " + resp)
+		      End If
+		    Catch e As JSONException
+		      // Not JSON — treat as a plain string response.
+		    End Try
 		  Else
 		    Var respJSON As JSONItem = response.Value("response")
 		    // The IDE returns structured failures as a JSON object with a
-		    // `scriptError` key (e.g. compile errors in the script we sent).
+		    // `scriptError` key (e.g. compile errors in the script we sent) or
+		    // a `buildError` key (e.g. DoCommand "BuildApp"/"RunApp" failures).
 		    // These must be surfaced as Failure, not stringified as Success.
 		    If respJSON.HasKey("scriptError") Then
 		      Return MCPKit.ToolResult.Failure("IDE script error: " + respJSON.ToString)
+		    End If
+		    If respJSON.HasKey("buildError") Then
+		      Return MCPKit.ToolResult.Failure("IDE build error: " + respJSON.ToString)
 		    End If
 		    resp = respJSON.ToString
 		  End If
@@ -223,46 +262,52 @@ Protected Class IDECommunicator
 	#tag EndMethod
 	
 	#tag Method, Flags = &h21
-		Private Function SendAndReceiveViaIPCSocket(candidatePath As String, payload As String, tag As String, timeoutMS As Integer) As JSONItem
+		Private Function SendAndReceiveViaIPCSocket(candidatePath As String, payload As String, tag As String, timeoutMS As Integer, ByRef scriptWasSent As Boolean) As JSONItem
 		  LastErrorMessage = ""
-		  
+		  scriptWasSent = False
+
 		  Var socketFile As New FolderItem(candidatePath, FolderItem.PathModes.Native)
 		  If socketFile = Nil Or Not socketFile.Exists Then
 		    LastErrorMessage = "IPC socket not found at: " + candidatePath
 		    Return Nil
 		  End If
-		  
+
 		  Var deadlineUS As Double = System.Microseconds + (timeoutMS * 1000.0)
 		  Var sock As New IPCSocket
 		  sock.Path = candidatePath
-		  
+
 		  Try
 		    sock.Connect
 		  Catch e As RuntimeException
 		    LastErrorMessage = "IPCSocket connect failed for " + candidatePath + ": " + e.Message
 		    Return Nil
 		  End Try
-		  
+
 		  While Not sock.IsConnected And System.Microseconds < deadlineUS
 		    sock.Poll
 		    App.SleepCurrentThread(5)
 		  Wend
-		  
+
 		  If Not sock.IsConnected Then
 		    sock.Close
 		    LastErrorMessage = "IPCSocket connect timeout for " + candidatePath + " within " + timeoutMS.ToString + "ms."
 		    Return Nil
 		  End If
-		  
+
+		  // Once Write succeeds, the IDE may have already received (and be
+		  // executing) the script even if we never see a response — e.g. a
+		  // timeout below. From this point on, a failure must NOT be treated
+		  // as safe to blindly retry with the same script.
 		  Try
 		    sock.Write(payload)
+		    scriptWasSent = True
 		    sock.Flush
 		  Catch e As RuntimeException
 		    sock.Close
 		    LastErrorMessage = "IPCSocket write failed for " + candidatePath + ": " + e.Message
 		    Return Nil
 		  End Try
-		  
+
 		  Var buffer As String = ""
 		  Var hadData As Boolean = False
 		  

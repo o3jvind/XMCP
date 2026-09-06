@@ -41,34 +41,14 @@ Inherits MCPKit.Tool
 		  Var script As String = "DoCommand """ + command + """" + EndOfLine + _
 		  "Print """""
 
-		  Var response As JSONItem = App.IDE.SendAndReceive(script)
-		  If response = Nil Then
-		    If App.IDE.LastErrorMessage <> "" Then
-		      Return MCPKit.ToolResult.Failure(App.IDE.LastErrorMessage)
-		    End If
-		    Return MCPKit.ToolResult.Failure("Timeout waiting for IDE response.")
+		  Var result As MCPKit.ToolResult = App.IDE.RunScript(script)
+		  If result.IsError Then
+		    Return result
 		  End If
-
-		  If response.HasKey("response") Then
-		    Var resp As Variant = response.Value("response")
-		    If resp.Type = Variant.TypeString Then
-		      Var respStr As String = resp.StringValue
-		      If respStr.Trim = "" Then
-		        Return MCPKit.ToolResult.Success("Debug action """ + action + """ executed.")
-		      End If
-		      // Check for error JSON
-		      Try
-		        Var resultJSON As New JSONItem(respStr)
-		        If resultJSON.HasKey("buildError") Then
-		          Return MCPKit.ToolResult.Failure("IDE error: " + respStr)
-		        End If
-		      Catch e As JSONException
-		      End Try
-		      Return MCPKit.ToolResult.Success(respStr)
-		    End If
+		  If result.Output.Trim = "" Then
+		    Return MCPKit.ToolResult.Success("Debug action """ + action + """ executed.")
 		  End If
-
-		  Return MCPKit.ToolResult.Success("Debug action """ + action + """ executed.")
+		  Return result
 
 		End Function
 	#tag EndMethod

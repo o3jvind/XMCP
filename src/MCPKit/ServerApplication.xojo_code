@@ -472,7 +472,8 @@ Inherits ConsoleApplication
 		      Return Nil
 		    End If
 		  ElseIf uri.BeginsWith("file://examples/") Then
-		    Var fileName As String = uri.Middle(16) // strip "file://examples/"
+		    Const kExamplesPrefix As String = "file://examples/"
+		    Var fileName As String = uri.Middle(kExamplesPrefix.Length) // strip "file://examples/"
 		    If fileName.Contains("/") Or fileName.Contains("..") Then
 		      MCPKit.Error(RequestID, MCPKit.ErrorTypes.InvalidParameters, "Invalid resource URI: " + uri)
 		      Return Nil
