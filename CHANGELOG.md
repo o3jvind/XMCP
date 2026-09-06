@@ -2,6 +2,25 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.9.0] - 2026-09-06
+
+### Added
+- **`scaffold_code_block`**: generates a correctly formatted `#tag` block (Method, Property, Constant, Event definition, Shared method, control event handler, or window event handler) for the caller to insert directly into a `.xojo_code`/`.xojo_window` file, instead of hand-writing `#tag` syntax from memory.
+- **`lint_project_file`**: validates a `.xojo_code`/`.xojo_window` file on disk for the four known failure modes — wrong `#tag` block ordering, `Flags`/keyword mismatches, unclosed or mismatched `#tag`/`#tag End` pairs, and unescaped characters in Constant `Default` values. Reports errors and warnings; never modifies the file.
+- Both tools read their format rules from a machine-readable JSON block embedded in `usage-guide.md` (`FormatRules.xojo_code`), so a rule fix or newly discovered edge case takes effect on the next tool call — no rebuild required.
+- `src/examples/` is now itself a real, buildable Xojo Desktop project (`Examples.xojo_project`), rebuilt entirely from IDE-generated content. Previously the reference templates were static, hand-authored text that was never compiled or validated by the Xojo IDE.
+
+### Fixed
+- Two silent, previously undetected bugs in the `examples/` reference templates, found only because they are now IDE-validated: `App.xojo_code`'s `Inherits Application` was deprecated API 1 (fixed to `Inherits DesktopApplication`); a hand-written Constant `Default` value with an unescaped opening quote compiled without error but silently dropped the value's first character at runtime.
+- `Window (deprecated class)`'s `Close` event name corrected to the API 2 `Closing` in the `DetailWindow` example, which had carried the deprecated name.
+
+### Notes
+Building and testing the two new tools surfaced several previously undocumented Xojo behaviors, now recorded in `CLAUDE.md`:
+- The bare `Tab` identifier is invalid in a Console Application target and produces a cascade of confusing, unrelated-looking compile errors.
+- `String.BeginsWith` and `String.IndexOf` are case-insensitive by default in this Xojo version — this broke `#tag` scanning against Xojo's own `#Tag Instance, Platform = ...` per-platform Constant override syntax until fixed with explicit `ComparisonOptions.CaseSensitive`.
+- `.xojo_code` Constant `Default` values use the same escape table as `.xojo_window` (`\x2C`, `\x3D`, `\'`, `\xHH`) for comma/equals/apostrophe/non-ASCII — not the simpler `""`-doubling previously assumed.
+- A custom event definition inside a class body is serialized by the IDE as `#tag Hook`, not `#tag Event` — `#tag Event` is reserved for overriding an already-inherited event.
+
 ## [1.8.1] - 2026-08-14
 
 ### Fixed

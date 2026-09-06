@@ -2,7 +2,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that gives AI assistants direct control over the [Xojo IDE](https://www.xojo.com). Built in Xojo using [MCPKit](https://github.com/gkjpettet/MCPKit) by Garry Pettet.
 
-XMCP connects to the Xojo IDE via its IPC socket and exposes 25 tools that let an AI navigate projects, read and write code, build, run, analyze, and save projects, control debug sessions, create project items, inspect and modify item descriptions and constants, look up Xojo documentation, read debug logs and system output, and estimate request cost - all through the standard MCP protocol over stdin/stdout.
+XMCP connects to the Xojo IDE via its IPC socket and exposes 28 tools that let an AI navigate projects, read and write code, build, run, analyze, and save projects, control debug sessions, create project items, inspect and modify item descriptions and constants, look up Xojo documentation, read debug logs and system output, estimate request cost, and generate or validate `.xojo_code`/`.xojo_window` file syntax directly on disk - all through the standard MCP protocol over stdin/stdout.
 
 XMCP also ships a `usage-guide.md` file next to the binary, exposed as an MCP resource. Compatible clients (e.g. Claude Code) fetch it automatically at session start, giving the AI immediate awareness of XMCP's capabilities, known IDE scripting limitations, and fallback strategies — without any extra configuration. You can edit the file to add project-specific notes without rebuilding.
 
@@ -85,7 +85,7 @@ XMCP retries both standard socket paths on each IDE request, so tools begin work
 
 ## Tools
 
-XMCP exposes 25 MCP tools organized into four categories.
+XMCP exposes 28 MCP tools organized into five categories.
 
 ### IDE Tools
 
@@ -330,6 +330,32 @@ Estimates expected token impact for a proposed request and optionally uses plann
 | `request` | String | Yes | Natural-language request to estimate (for example: `Add a ListBox to Window1`). |
 | `planned_tools` | String | No | Optional comma-separated tool names you expect to call (for example: `select_project_item,create_project_item`). |
 
+### Disk-File Generation and Validation Tools
+
+These tools generate or validate `.xojo_code`/`.xojo_window` `#tag` syntax directly on disk — no IDE socket call, so they work even when the Xojo IDE is closed. Both read their format rules (block ordering, `Flags`/keyword mapping, Constant `Default` escaping) from a machine-readable JSON block embedded in `usage-guide.md`, so a rule fix takes effect on the next tool call with no rebuild.
+
+#### `scaffold_code_block`
+
+Generates a correctly formatted `#tag` block (Method, Property, Constant, Event definition, Shared method, control event handler, or window event handler) for the caller to insert into a file directly, instead of hand-writing `#tag` syntax from memory.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `block_kind` | String | Yes | One of: `method`, `property`, `constant`, `event_definition`, `shared_method`, `control_event`, `window_event`. |
+| `name` | String | Yes | Method/property/constant/event name, or the control name for `control_event`. |
+| `visibility` | String | No | `public`, `protected`, or `private`. Applies to `method`/`property`/`shared_method`. Default: `public`. |
+| `event_or_signature` | String | No | Event signature (e.g. `Pressed()`) for `control_event`/`window_event`, or parameter list for `event_definition`. |
+| `constant_type` | String | No | For `constant` only: `String`, `Integer`, `Double`, `Boolean`, or `Color`. Default: `String`. |
+| `default_value` | String | No | For `constant` only: the raw, unescaped default value — this tool escapes it automatically. |
+| `target_file_type` | String | No | `xojo_code` or `xojo_window`. Informational only — escaping is identical for both. Default: `xojo_code`. |
+
+#### `lint_project_file`
+
+Validates a `.xojo_code` or `.xojo_window` file on disk for known structural errors: wrong `#tag` block ordering, `Flags`/keyword mismatches, unclosed or mismatched `#tag`/`#tag End` pairs, and unescaped characters in Constant `Default` values. Call this after editing a file directly on disk and before `revert_project`. Reports errors and warnings; never modifies the file.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | String | Yes | Absolute path to the `.xojo_code` or `.xojo_window` file to validate. |
+
 ## Resources
 
 XMCP exposes one MCP resource that AI clients can fetch at session start:
@@ -355,11 +381,12 @@ XMCP
 │   ├── ToolResult         — Success/Failure result type
 │   ├── OptionParser       — CLI argument parsing
 │   └── Option             — CLI option definition
-└── Tools/                 — 25 MCP tool implementations
+└── Tools/                 — 28 MCP tool implementations
     ├── IDE tools (19)     — Control the Xojo IDE via IPC
     ├── Doc tools (3)      — Search and browse local Xojo documentation
     ├── Debug tools (2)    — Read crash logs and system diagnostic output
-    └── Cost tools (1)     — Estimate request token cost and alternatives
+    ├── Cost tools (1)     — Estimate request token cost and alternatives
+    └── Disk-file tools (2)— Generate/validate .xojo_code/.xojo_window syntax
 ```
 
 ### IDE Communication
