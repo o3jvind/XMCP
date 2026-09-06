@@ -58,7 +58,7 @@ MCP Client (stdin/stdout JSON-RPC)
 
 If either is absent, `search_docs` falls back to keyword search transparently. The AI sees the same tool name and output format either way.
 
-The RAG database must be placed in the same directory as `llms-full.txt` (i.e. `DocsPath`). To build it, run the XMCP-RAG indexer with the embedding server running.
+The RAG database now lives at XDOX's canonical path (`~/Library/Application Support/dk.o3jvind.xdox/xdox.db`), built and kept up to date by the XDOX app — see the DB discovery order above. Placing a legacy `xojo_rag.db` next to `llms-full.txt` (i.e. in `DocsPath`) still works as a fallback for setups predating XDOX, but is no longer the recommended or primary location.
 
 **SemanticSearch pipeline (current implementation):**
 
