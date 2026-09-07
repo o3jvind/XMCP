@@ -32,6 +32,7 @@ XMCP gives you direct control over the Xojo IDE via 28 tools:
 - **Generate and validate disk edits**: `scaffold_code_block` (generate a correctly formatted `#tag` block), `lint_project_file` (validate a `.xojo_code`/`.xojo_window` file for known structural errors)
 - **IDE scripting**: `run_ide_script` (escape hatch for anything not covered)
 - **Documentation**: `search_docs`, `lookup_class`, `list_doc_topics`
+- **Third-party docsets**: `list_docsets`, `search_docset`, `get_docset_entry` (Dash/Zeal `.docset` bundles registered via `--docset-path`)
 - **Debugging**: `get_debug_log`, `get_system_log`
 - **Cost estimation**: `estimate_request_cost` — call this proactively before broad or documentation-heavy tasks to check whether the approach is likely to be expensive, and to get suggestions for cheaper alternatives
 
@@ -412,6 +413,16 @@ The IDE scripting assignment `ConstantValue(name) = value` never raises an error
 - `search_docs` — search guides and tutorials by natural-language query. Use this first for any conceptual or how-to question.
 - `lookup_class` — look up a specific class or method in the API reference.
 - `list_doc_topics` — returns the full documentation index (143,000+ characters). **Never call this to find information** — it wastes tokens and requires multiple slow read passes. Use `search_docs` instead. Only call `list_doc_topics` if the user explicitly asks for a topic overview.
+
+### Third-party docsets — list_docsets, search_docset, get_docset_entry
+
+These three tools are separate from `search_docs`/`lookup_class`/`list_doc_topics` above: they search **Dash/Zeal `.docset` bundles** the user registered with one or more `--docset-path` flags (e.g. framework, language, or library docs unrelated to Xojo itself), not the Xojo documentation. If none are registered, all three fail with a message telling the user to use `--docset-path`.
+
+- `list_docsets` — lists the registered docsets by name with entry counts. Call this first when a docset search might be relevant, to learn the exact docset names available.
+- `search_docset` — searches entry names (class, method, function, guide, etc.) across all registered docsets, or a single one via the optional `docset_name` parameter. Prefer scoping to one docset with `docset_name` once you know which one is relevant — it avoids irrelevant matches from unrelated docsets.
+- `get_docset_entry` — reads the full plain-text content of one entry. Requires both `docset_name` and the exact `entry_name` as returned by `search_docset`.
+
+Recommended flow: `list_docsets` → `search_docset` (optionally scoped) → `get_docset_entry` for the full content of a specific match.
 
 ### IDE scripting quirks (run_ide_script)
 

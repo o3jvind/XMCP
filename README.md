@@ -2,7 +2,9 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that gives AI assistants direct control over the [Xojo IDE](https://www.xojo.com). Built in Xojo using [MCPKit](https://github.com/gkjpettet/MCPKit) by Garry Pettet.
 
-XMCP connects to the Xojo IDE via its IPC socket and exposes 28 tools that let an AI navigate projects, read and write code, build, run, analyze, and save projects, control debug sessions, create project items, inspect and modify item descriptions and constants, look up Xojo documentation, read debug logs and system output, estimate request cost, and generate or validate `.xojo_code`/`.xojo_window` file syntax directly on disk - all through the standard MCP protocol over stdin/stdout.
+XMCP connects to the Xojo IDE via its IPC socket and exposes 31 tools that let an AI navigate projects, read and write code, build, run, analyze, and save projects, control debug sessions, create project items, inspect and modify item descriptions and constants, look up Xojo documentation, search third-party Dash/Zeal `.docset` bundles, read debug logs and system output, estimate request cost, and generate or validate `.xojo_code`/`.xojo_window` file syntax directly on disk - all through the standard MCP protocol over stdin/stdout.
+
+XMCP is built Xojo-first: the IDE tools, the bundled documentation search, and the `examples/` reference templates all exist because the author is a Xojo developer. But nothing in its architecture is Xojo-*only* — the documentation layer (see [Adapting XMCP to your stack](#adapting-xmcp-to-your-stack)) works for any language with a Dash/Zeal docset, and a project working in multiple languages can register several at once.
 
 XMCP also ships a `usage-guide.md` file next to the binary, exposed as an MCP resource. Compatible clients (e.g. Claude Code) fetch it automatically at session start, giving the AI immediate awareness of XMCP's capabilities, known IDE scripting limitations, and fallback strategies — without any extra configuration. You can edit the file to add project-specific notes without rebuilding.
 
@@ -66,6 +68,22 @@ To specify a custom documentation path:
 }
 ```
 
+To register one or more third-party `.docset` bundles (repeat the flag per bundle — see [Adapting XMCP to your stack](#adapting-xmcp-to-your-stack)):
+
+```json
+{
+  "mcpServers": {
+    "xmcp": {
+      "command": "/path/to/XMCP",
+      "args": [
+        "--docset-path", "/path/to/PHP.docset",
+        "--docset-path", "/path/to/JavaScript.docset"
+      ]
+    }
+  }
+}
+```
+
 ## Usage
 
 ```
@@ -77,6 +95,7 @@ XMCP [options]
 | `-h`, `--help` | Show help and list all available tools |
 | `-v`, `--verbose` | Enable verbose debug logging to stderr |
 | `-d`, `--docs-path PATH` | Path to Xojo documentation directory (auto-detected if omitted) |
+| `--docset-path PATH` | Path to a Dash/Zeal-style `.docset` bundle. Repeatable — pass once per bundle. |
 
 The server communicates via JSON-RPC over stdin/stdout following the MCP protocol. It is not meant to be run interactively - it is launched by an MCP client (like Claude Code, Codex CLI, or Claude Desktop).
 
@@ -85,7 +104,7 @@ XMCP retries both standard socket paths on each IDE request, so tools begin work
 
 ## Tools
 
-XMCP exposes 28 MCP tools organized into five categories.
+XMCP exposes 31 MCP tools organized into six categories.
 
 ### IDE Tools
 
@@ -296,6 +315,37 @@ Lists available Xojo documentation topics and pages from the `llms.txt` index. U
 |-----------|------|----------|-------------|
 | `filter` | String | No | Keyword to filter topics (e.g. `Desktop`, `database`, `networking`). If empty, returns all topics. |
 
+### Docset Tools
+
+These tools search third-party documentation from Dash/Zeal-style `.docset` bundles — the same format used by [Dash](https://kapeli.com/dash) (macOS) and [Zeal](https://zealdocs.org) (Windows/Linux), covering hundreds of languages, frameworks, and libraries via [Dash-User-Contributions](https://github.com/Kapeli/Dash-User-Contributions). Independent of the Xojo-specific documentation tools above — register one or more bundles with `--docset-path` (repeatable) and they're immediately searchable, no restart-time indexing required.
+
+Two on-disk docset layouts are supported: a plain `Contents/Resources/Documents/` HTML tree, and Dash's space-saving `tarix.tgz` archive layout — the latter is extracted once into `~/Library/Application Support/dk.o3jvind.xmcp/docset-cache/` on first read and served from that cache afterward.
+
+#### `list_docsets`
+
+Lists the registered `.docset` bundles by name, with their entry counts. Call this first to discover available docset names before calling `search_docset` or `get_docset_entry`.
+
+*No parameters.*
+
+#### `search_docset`
+
+Searches entry names (class, method, function, guide, etc.) across all registered docsets, or a single one via `docset_name`. Results are grouped by docset when searching all of them.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | String | Yes | The search term to look for (e.g. a class, method, or function name). |
+| `docset_name` | String | No | Limit the search to one registered docset by name (as returned by `list_docsets`). If omitted, all registered docsets are searched. |
+| `max_results` | Integer | No | Maximum number of matching entries to return per docset. Default: 10. |
+
+#### `get_docset_entry`
+
+Reads the full documentation content for a specific entry from a registered docset, as plain text (HTML stripped). Use `search_docset` first to find the exact `entry_name`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `docset_name` | String | Yes | The registered docset to read from (as returned by `list_docsets`). |
+| `entry_name` | String | Yes | The exact entry name to read (as returned by `search_docset`). |
+
 ### Debug Tools
 
 These tools help diagnose runtime errors in Xojo apps by reading exception logs and system diagnostic output. For best results when building an app from scratch with XMCP, add an `App.UnhandledException` handler that writes to `/tmp/xmcp_debug.log`.
@@ -358,13 +408,24 @@ Validates a `.xojo_code` or `.xojo_window` file on disk for known structural err
 
 ## Resources
 
-XMCP exposes one MCP resource that AI clients can fetch at session start:
+XMCP exposes MCP resources that AI clients can fetch at session start:
 
-| URI                     | Name             | Description                                                                                        |
-|-------------------------|------------------|----------------------------------------------------------------------------------------------------|
-| `file://usage-guide.md` | XMCP Usage Guide | AI-facing guide: capabilities, limitations, when to use IDE tools vs. direct file editing, and tips |
+| URI                        | Name                | Description                                                                                        |
+|----------------------------|----------------------|----------------------------------------------------------------------------------------------------|
+| `file://usage-guide.md`    | XMCP Usage Guide     | AI-facing guide: capabilities, limitations, when to use IDE tools vs. direct file editing, and tips |
+| `file://examples/<name>`   | Example: `<name>`    | One resource per file in `examples/` — reference templates for correct `.xojo_code`/`.xojo_window` structure |
 
-The `usage-guide.md` file is distributed next to the XMCP binary. You can edit it to add project-specific notes or custom conventions without rebuilding. Compatible MCP clients (e.g. Claude Code) fetch it automatically via `resources/list` and `resources/read`.
+Both `usage-guide.md` and `examples/` are distributed next to the XMCP binary and are plain files on disk — no rebuild required to change either. Compatible MCP clients (e.g. Claude Code) fetch them automatically via `resources/list` and `resources/read`.
+
+## Adapting XMCP to your stack
+
+XMCP ships configured for Xojo development: the default `usage-guide.md` biases the AI toward IDE tools and Xojo documentation, and `examples/` holds Xojo reference templates. Nothing about the underlying mechanism is Xojo-specific, though — three parts of XMCP are meant to be edited per project or per developer, not just per Xojo version:
+
+- **`--docset-path`** — register any Dash/Zeal `.docset` bundle (see [Docset Tools](#docset-tools)) to make a language, framework, or library's documentation searchable alongside — or instead of — Xojo's own docs. A project mixing Xojo with an HTML/JS/CSS front end, for example, can register docsets for all three and search whichever is relevant.
+- **`examples/`** — swap the reference templates for whatever the current language or project actually looks like. The mechanism (one MCP resource per file, auto-discovered from the folder) doesn't care what's in it.
+- **`usage-guide.md`** — rewrite the guidance itself: which tools to prefer, in what order, for this particular mix of languages and conventions. It's plain text fetched into the AI's context at session start, not enforced code — treat it as a strong steer, not a guarantee, and back anything that must hold every time (a required namespace, a formatting rule) with a mechanical check like `lint_project_file` instead.
+
+None of this requires touching XMCP's source — a `.xojo_project`-free setup (docsets only, no Xojo IDE running) works fine for the documentation tools; the IDE tools simply return connection errors until a project is opened.
 
 ## Architecture
 
@@ -373,6 +434,7 @@ XMCP
 ├── App                    — MCP server entry point, tool registration, docs auto-detection
 ├── IDECommunicator        — IPC socket communication with Xojo IDE (protocol v2)
 ├── SemanticSearch         — Optional hybrid search (vector + FTS5, neighbour expansion, cache)
+├── Docset                 — Reads a single Dash/Zeal .docset bundle (SQLite index + HTML/tarix)
 ├── MCPKit/                — MCP protocol framework
 │   ├── ServerApplication  — JSON-RPC stdin/stdout server loop
 │   ├── Tool               — Base class for MCP tools
@@ -381,9 +443,10 @@ XMCP
 │   ├── ToolResult         — Success/Failure result type
 │   ├── OptionParser       — CLI argument parsing
 │   └── Option             — CLI option definition
-└── Tools/                 — 28 MCP tool implementations
+└── Tools/                 — 31 MCP tool implementations
     ├── IDE tools (19)     — Control the Xojo IDE via IPC
     ├── Doc tools (3)      — Search and browse local Xojo documentation
+    ├── Docset tools (3)   — Search third-party Dash/Zeal .docset bundles
     ├── Debug tools (2)    — Read crash logs and system diagnostic output
     ├── Cost tools (1)     — Estimate request token cost and alternatives
     └── Disk-file tools (2)— Generate/validate .xojo_code/.xojo_window syntax
@@ -411,6 +474,7 @@ On startup, XMCP scans `~/Library/Application Support/Xojo/Xojo/` for the newest
 - **macOS only** — depends on Unix domain sockets and macOS-specific Xojo docs location conventions.
 - **IDE tools require an open project** — the Xojo IDE scripting socket must be available and a project must be loaded.
 - **Documentation tools require local docs** — depend on `llms-full.txt`, `llms.txt`, and `_sources/*.rst.txt` files shipped with the Xojo IDE.
+- **Docset tools require registered bundles** — `list_docsets`, `search_docset`, and `get_docset_entry` return an error until at least one `--docset-path` is supplied; a docset shipped as a `tarix.tgz` archive is extracted to a local cache on first read, which can take a few seconds for a large bundle.
 - **`get_code`, `set_code`, `get_selected_text`, `set_selected_text` require a method or property to be active** — these tools operate on the code editor view. If the selected item in the Navigator is a class, module, or folder (not a method, property, or other code item), they return an error: `No code editor is active. Navigate to a method or property first.`
 - **`select_project_item` navigates to classes and folders, not individual methods or events** — the Xojo IDE scripting API (`SelectProjectItem`) can navigate to top-level items and classes, but not to individual methods, properties, or event implementations. `list_project_items` also does not list events. To read or write code for a specific method or event, use `get_code` or `set_code` with the full dot-separated path — XMCP navigates automatically before reading/writing.
 - **IPC socket timing after navigation** — the Xojo IDE briefly closes its IPC socket (~2–3 seconds) after certain navigation operations. XMCP handles this with automatic retries (up to 5 × 1 second), so tools work reliably, but sequential IDE calls may take a few seconds longer after navigation.

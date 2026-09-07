@@ -2,6 +2,13 @@
 
 All notable changes to XMCP will be documented here.
 
+## [Unreleased]
+
+### Added
+- **`list_docsets`, `search_docset`, `get_docset_entry`**: search third-party documentation from Dash/Zeal-style `.docset` bundles, registered via one or more `--docset-path` flags. `list_docsets` lists registered bundles with entry counts; `search_docset` searches entry names across all or one docset (`docset_name` parameter); `get_docset_entry` reads a specific entry's HTML content, stripped to plain text. Independent of `search_docs`/`lookup_class`, which remain Xojo-specific.
+- New `Docset.xojo_code` class wraps a single `.docset` bundle's SQLite `searchIndex` table and HTML `Documents/` tree, following the same lazy-probe pattern as `SemanticSearch` so an unreadable bundle degrades gracefully instead of failing startup.
+- **Tarix-packed docsets**: some Dash distributions (e.g. AppleScript) ship no `Documents/` folder at all, only a `Contents/Resources/tarix.tgz` archive. `Docset` now shells out to the system `tar` to extract such an archive once into `~/Library/Application Support/dk.o3jvind.xmcp/docset-cache/<name>/` on first `get_docset_entry` call, then reads from the cache thereafter. Xojo's built-in `FolderItem.Unzip`/`.Zip` only cover the ZIP format, not tar+gzip, so this is the only dependency-free option (the alternative, MBS's Compression/Archive plugin, would add a new project-wide dependency).
+
 ## [1.9.1] - 2026-09-06
 
 ### Fixed
