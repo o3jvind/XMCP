@@ -2,7 +2,7 @@
 
 All notable changes to XMCP will be documented here.
 
-## [Unreleased]
+## [1.10.0] - 2026-09-07
 
 ### Added
 - **`list_docsets`, `search_docset`, `get_docset_entry`**: search third-party documentation from Dash/Zeal-style `.docset` bundles, registered via one or more `--docset-path` flags. `list_docsets` lists registered bundles with entry counts; `search_docset` searches entry names across all or one docset (`docset_name` parameter); `get_docset_entry` reads a specific entry's HTML content, stripped to plain text. Independent of `search_docs`/`lookup_class`, which remain Xojo-specific.
