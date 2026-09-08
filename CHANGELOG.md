@@ -2,6 +2,11 @@
 
 All notable changes to XMCP will be documented here.
 
+## [1.10.1] - 2026-09-08
+
+### Fixed
+- **`OptionParser.ArrayValue`**: no longer throws `TypeMismatchException` when an array-type option (e.g. `--docset-path`) was never supplied on the command line. The unset option's `Value` holds a scalar empty-string `Variant`, and assigning it directly into a `Variant()` array crashed the whole server at startup — including in MCP clients like Claude Desktop, whose config invokes XMCP with no arguments at all. Fixed by checking `o.WasSet` before reading `o.Value`, so an unset array option now correctly yields an empty array.
+
 ## [1.10.0] - 2026-09-07
 
 ### Added

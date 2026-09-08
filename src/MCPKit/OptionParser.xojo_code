@@ -66,11 +66,11 @@ Protected Class OptionParser
 		  
 		  Var v() As Variant
 		  Var o As MCPKit.Option = OptionValue(key)
-		  
-		  If Not (o Is Nil) Then
+
+		  If Not (o Is Nil) And o.WasSet Then
 		    v = o.Value
 		  End If
-		  
+
 		  Return v
 		End Function
 	#tag EndMethod
