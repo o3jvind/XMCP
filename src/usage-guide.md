@@ -380,9 +380,29 @@ Keep the fenced block valid JSON. Do not remove keys the tools rely on without u
 
 ## IDE tool limitations to be aware of
 
-### `run_ide_script` shows an empty `Print` result as the literal text `{}`
+### The IDE answers once per `Print` - and not at all without one
 
-If a script's `Print` output is an empty string, `run_ide_script` shows this as the literal two-character text `{}` — that reflects an empty result, not an error. Structured tools that go through the same underlying IDE communication (`list_project_items`, `debug_control`, `constant_value`, etc.) normalize this correctly internally and don't leak `{}` into their own success/failure logic, but their MCP output can still render as an empty-looking result when the underlying value genuinely is empty — that's expected, not a sign of failure.
+Measured against the IDE socket directly on macOS and Windows, both Xojo 2026r2.1:
+
+| Script | Reply |
+|---|---|
+| `Print "one"` | one reply |
+| `Print "one"` then `Print "two"` | **two replies** - `run_ide_script` reports the first and drops the rest |
+| no `Print` | **no reply at all** |
+| `Print ""` | one reply, an empty object |
+
+So **print once**, at the point whose value you want back. Printing twice does not
+concatenate; the later value is discarded.
+
+A script with no `Print` would never be answered, so `run_ide_script` appends one
+before sending and reports "The script ran but produced no value." You do not need to
+add a trailing `Print` yourself. Some commands genuinely have no value to give -
+`PropertyValue` returns nothing for an item it does not support - and that is not a
+failure: verify the effect in a separate call.
+
+Structured tools that go through the same IDE communication (`list_project_items`,
+`debug_control`, `constant_value`) normalise an empty reply internally, so an
+empty-looking result from them means the value genuinely is empty.
 
 ### Never use `DoCommand "Insert..."` to add controls to windows
 

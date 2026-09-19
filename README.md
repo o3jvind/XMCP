@@ -511,6 +511,33 @@ XMCP connects to the Xojo IDE via an `IPCSocket` - a Unix domain socket on macOS
 
 The `IDECommunicator` class handles connection management, tag generation, synchronous send/receive with configurable timeouts, and NUL-terminated message framing using direct `IPCSocket` communication.
 
+#### One reply, several messages
+
+A single request can be answered by **several messages under the same tag**. Measured against the IDE socket directly on macOS 15.7.5 and Windows 11, both Xojo 2026r2.1:
+
+| Script | Reply |
+|---|---|
+| `Print "one"` | one frame, `{"response": "one"}` |
+| `Print "one"` then `Print "two"` | **two frames**, one per `Print` |
+| no `Print` at all | **no frame, ever** |
+| `Print ""` | one frame, `{"response": {}}` |
+
+A script's output and a compiler warning about that script land about a millisecond apart, and an analysis answers with its `buildError` and the `Print` sentinel together. Returning on the first matching frame made the answer whichever part won the race - which is why a successful script sometimes reported only a warning.
+
+XMCP keeps reading for a short window (250 ms) after the first matching frame and merges the parts. An error part is the answer; otherwise the output is; a warning is the answer only when it is all there is. The other parts stay attached, which is how a tool reports the warning that *accompanied* a successful script rather than one or the other. When the first part is only a warning the real output has not been sent yet and may take as long as the script itself, so that wait is much longer and ends the moment any further part arrives.
+
+Because a script with no `Print` never answers, `run_ide_script` appends one before sending. Without it the request times out, its socket is parked as though the IDE were busy, and every later request is refused until the give-up timer expires - one `Print`-less script would block the session.
+
+The reply shapes XMCP recognises: a string (what the script printed), an empty object (it printed an empty string), `scriptError` - a **heterogeneous** array whose entries are `scriptCompilerError`, `scriptRuntimeError` or `scriptCompilerWarning`, so a warnings-only array means the script ran - and `buildError` with `errors` and `warnings`, plus `missingFiles`, `openErrors` and `loadError`. Script error line numbers are reported one lower than the IDE sends them, because the IDE wraps every script in a line of boilerplate before compiling it.
+
+#### When the IDE does not answer
+
+The IDE runs scripts one at a time on its main thread, so during a build - or behind a modal dialog - it answers nothing until it is done, then answers everything that queued up, on the connections the requests arrived on.
+
+A socket whose request timed out is therefore **not closed**. On macOS and Linux the IPCSocket is a Unix domain socket, and the IDE's later write into a closed peer raises `SIGPIPE`, which the Xojo IDE does not ignore: it dies mid-build, with no crash report. The socket is parked open instead, and released once the IDE has replied, closed the connection, or two hours have passed.
+
+While one is parked, further requests are refused rather than sent, naming the script still outstanding. Queueing a second request behind a busy IDE only makes it time out too, and reports a timeout where the truth is that the IDE is still working.
+
 For each IDE request, XMCP tries the last successful socket path first, then every candidate path for the platform. If all attempts fail, the tool returns a detailed connection/timeout error naming every path it tried.
 
 #### The transport underneath

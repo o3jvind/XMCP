@@ -2,6 +2,22 @@
 Protected Class App
 Inherits MCPKit.ServerApplication
 	#tag Event
+		Sub Idle()
+		  /// Release any socket the IDE has finished with, even when no new request comes.
+		  ///
+		  /// A parked socket holds the IDE's single IPC connection slot, so while one is held
+		  /// no other client can reach the IDE at all - not another XMCP, not the IDE
+		  /// Communicator example. Draining only when the next request arrives meant an XMCP
+		  /// that parked a socket and then went quiet locked the IDE away from everyone until
+		  /// the give-up timer expired. Polling here releases it as soon as the IDE answers.
+		  ///
+		  /// DrainPending returns immediately when nothing is parked, which is the normal case.
+		  
+		  If IDE <> Nil Then Call IDE.DrainPending
+		End Sub
+	#tag EndEvent
+	
+	#tag Event
 		Sub Configure()
 		  // Set server identity.
 		  Self.Name = "XMCP"

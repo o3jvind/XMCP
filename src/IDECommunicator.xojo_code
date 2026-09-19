@@ -89,7 +89,21 @@ Protected Class IDECommunicator
 		  /// may have already executed it — resending could run it twice.
 
 		  LastErrorMessage = ""
-
+		  mParkedThisRequest = False
+		  
+		  // A request the IDE has accepted but not answered is still being executed: the
+		  // IDE runs scripts one at a time on its main thread, and a build (or a modal
+		  // dialog) holds it for minutes. Sending another request now would only queue it
+		  // behind that one and give up on it too. Say so instead; DrainPending notices
+		  // when the IDE has caught up and the next call goes through normally.
+		  If DrainPending > 0 Then
+		    LastErrorMessage = "The Xojo IDE is still executing an earlier request and has not answered it yet:" + _
+		    EndOfLine + PendingSummary + EndOfLine + _
+		    "No new request was sent. A build blocks the IDE until it finishes; wait for it, then try again."
+		    LogVerbose("IDE request refused: " + LastErrorMessage)
+		    Return Nil
+		  End If
+		  
 		  Var tag As String = NextTag
 
 		  // Build protocol upgrade + script request.
@@ -113,8 +127,7 @@ Protected Class IDECommunicator
 		    Var socketErrors() As String
 		    For Each candidatePath As String In CandidateSocketPaths
 		      LogVerbose("IDE request " + tag + ": IPCSocket path " + candidatePath + " (attempt " + attempt.ToString + ")")
-		      Var scriptWasSent As Boolean
-		      Var responseViaSocket As JSONItem = SendAndReceiveViaIPCSocket(candidatePath, payload, tag, timeoutMS, scriptWasSent)
+		      Var responseViaSocket As JSONItem = SendAndReceiveViaIPCSocket(candidatePath, payload, tag, timeoutMS, script)
 		      If responseViaSocket <> Nil Then
 		        mConnected = True
 		        mSocketPath = candidatePath
@@ -123,25 +136,24 @@ Protected Class IDECommunicator
 		        Return responseViaSocket
 		      End If
 
-		      If scriptWasSent Then
-		        // The IDE may already have received and be executing this
-		        // script; we just never saw a matching response. Resending
-		        // the same script (possibly to the same underlying socket
-		        // via a different candidate path) could execute it twice.
-		        // Surface this as a distinct, non-retryable failure instead.
-		        LastErrorMessage = "IDE script was sent via " + candidatePath + " but no response was received within " + _
-		        timeoutMS.ToString + "ms. The script may have already executed — not retrying to avoid duplicate execution. " + _
-		        "Original error: " + LastErrorMessage
-		        LogVerbose("IDE request " + tag + ": " + LastErrorMessage)
-		        Return Nil
-		      End If
-
 		      If LastErrorMessage <> "" Then
 		        LogVerbose("IDE request " + tag + ": IPCSocket failed (" + candidatePath + "): " + LastErrorMessage)
 		        socketErrors.Add(LastErrorMessage)
 		      End If
+		      
+		      // The request was delivered and is now parked: the IDE has it and will execute
+		      // it. Trying the remaining candidate paths - on macOS the same socket under
+		      // other names - would only knock on a busy IDE again and clutter the message
+		      // with "no listener" noise that is not the problem.
+		      If mParkedThisRequest Then Exit
 		    Next candidatePath
-
+		    
+		    If mParkedThisRequest Then
+		      mParkedThisRequest = False
+		      LastErrorMessage = String.FromArray(socketErrors, " | ")
+		      Exit While
+		    End If
+		    
 		    // All paths failed. If the socket was simply not found (IDE temporarily
 		    // closed it after a navigation), wait briefly and retry.
 		    Var allNotFound As Boolean = True
@@ -250,9 +262,8 @@ Protected Class IDECommunicator
 	#tag EndMethod
 	
 	#tag Method, Flags = &h21
-		Private Function SendAndReceiveViaIPCSocket(candidatePath As String, payload As String, tag As String, timeoutMS As Integer, ByRef scriptWasSent As Boolean) As JSONItem
+		Private Function SendAndReceiveViaIPCSocket(candidatePath As String, payload As String, tag As String, timeoutMS As Integer, script As String) As JSONItem
 		  LastErrorMessage = ""
-		  scriptWasSent = False
 
 		  #If Not TargetWindows Then
 		    // A Unix domain socket is a real filesystem entry, so a missing file means the
@@ -319,7 +330,6 @@ Protected Class IDECommunicator
 		  // as safe to blindly retry with the same script.
 		  Try
 		    sock.Write(payload)
-		    scriptWasSent = True
 		    sock.Flush
 		  Catch e As RuntimeException
 		    sock.Close
@@ -330,7 +340,18 @@ Protected Class IDECommunicator
 		  Var buffer As String = ""
 		  Var hadData As Boolean = False
 		  
-		  While System.Microseconds < deadlineUS
+		  // One reply can arrive as several messages under the same tag: a script's Print
+		  // output and a compiler warning about it land about a millisecond apart, and an
+		  // analysis returns its buildError and the Print sentinel together. Returning on
+		  // the first frame made the answer whichever part won the race. After the first
+		  // matching frame the loop keeps reading for a short window and MergeReply folds
+		  // the parts. When the first part is only a warning the real output is still
+		  // coming and may take as long as the script itself, so that wait is longer and
+		  // ends as soon as any further part arrives.
+		  Var frames() As JSONItem
+		  Var collectUntilUS As Double = deadlineUS
+		  
+		  While System.Microseconds < deadlineUS And System.Microseconds < collectUntilUS
 		    sock.Poll
 
 		    Var chunk As String = sock.ReadAll
@@ -353,9 +374,19 @@ Protected Class IDECommunicator
 		      Try
 		        Var response As New JSONItem(frame)
 		        If response.HasKey("tag") And response.Value("tag").StringValue = tag Then
-		          sock.Close
-		          LastErrorMessage = ""
-		          Return response
+		          frames.Add(response)
+		          If frames.Count = 1 Then
+		            If ReplyKind(response) = "warning" Then
+		              collectUntilUS = System.Microseconds + (kSplitWaitForOutputMS * 1000.0)
+		            Else
+		              collectUntilUS = System.Microseconds + (kSplitReplyWindowMS * 1000.0)
+		            End If
+		          ElseIf ReplyKind(frames(0)) = "warning" Then
+		            // The output the warning was holding up has arrived; nothing else is coming.
+		            collectUntilUS = System.Microseconds
+		          End If
+		        Else
+		          LogVerbose("IDE request " + tag + ": ignoring a frame for another tag (stale or unsolicited).")
 		        End If
 		      Catch e As JSONException
 		        // Ignore malformed chunks and continue.
@@ -363,15 +394,381 @@ Protected Class IDECommunicator
 		    Wend
 		  Wend
 		  
-		  sock.Close
-		  
-		  If hadData Then
-		    LastErrorMessage = "Received IPC data from " + candidatePath + ", but no matching tag was found for " + tag + "."
-		  Else
-		    LastErrorMessage = "No IPCSocket response from " + candidatePath + " within " + timeoutMS.ToString + "ms."
+		  If frames.Count > 0 Then
+		    sock.Close
+		    LastErrorMessage = ""
+		    Return MergeReply(frames)
 		  End If
 		  
+		  If hadData Then
+		    sock.Close
+		    LastErrorMessage = "Received IPC data from " + candidatePath + ", but no matching tag was found for " + tag + "."
+		    Return Nil
+		  End If
+		  
+		  // The IDE accepted the request - connect and write both succeeded - and has not
+		  // answered within the timeout. Do NOT close the socket. The IDE will answer when
+		  // it is done, and a write into a closed peer raises SIGPIPE, which the Xojo IDE
+		  // does not ignore: it dies mid-build, with no crash report. Park the socket open
+		  // instead; DrainPending releases it once the IDE has replied or has gone away.
+		  AddPending(sock, tag, script)
+		  mParkedThisRequest = True
+		  LastErrorMessage = "The Xojo IDE accepted the request but has not answered within " + timeoutMS.ToString + _
+		  "ms. It is most likely busy - a build, or a modal dialog waiting for a click - and it will finish " + _
+		  "the request regardless. The connection is kept open so the IDE can reply safely; that reply will " + _
+		  "be discarded. Further requests are refused until the IDE has answered."
+		  
 		  Return Nil
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h0
+		Function ReplyKind(envelope As JSONItem) As String
+		  /// Classifies one reply envelope by what its "response" carries:
+		  ///   "output"  - a string (what the script printed), or an object that is none of the below
+		  ///   "empty"   - an empty object: the IDE's answer to a script that printed nothing
+		  ///   "warning" - diagnostics that are warnings only; the script or build still ran
+		  ///   "error"   - scriptError with errors, buildError with errors, missingFiles, openErrors, loadError
+		  ///   "unknown" - no "response" key at all
+		  ///
+		  /// scriptError is a heterogeneous array: each entry has a "type" that is
+		  /// scriptCompilerError, scriptRuntimeError or scriptCompilerWarning, and a reply that
+		  /// carries only warnings means the script compiled and ran. Treating the whole array as
+		  /// fatal reported failures for scripts that had worked.
+		  
+		  If envelope = Nil Or Not envelope.HasKey("response") Then Return "unknown"
+		  
+		  Var resp As Variant = envelope.Value("response")
+		  If resp.Type = Variant.TypeString Then Return "output"
+		  
+		  Var obj As JSONItem
+		  Try
+		    obj = envelope.Value("response")
+		  Catch e As RuntimeException
+		    Return "output"
+		  End Try
+		  If obj = Nil Then Return "output"
+		  If obj.Count = 0 Then Return "empty"
+		  
+		  If obj.HasKey("scriptError") Then
+		    Var items As JSONItem = obj.Value("scriptError")
+		    If items <> Nil And items.IsArray Then
+		      For i As Integer = 0 To items.Count - 1
+		        Var entry As JSONItem = items.ChildAt(i)
+		        Var kind As String = If(entry <> Nil And entry.HasKey("type"), entry.Value("type").StringValue, "")
+		        If Not kind.Lowercase.EndsWith("warning") Then Return "error"
+		      Next i
+		      Return "warning"
+		    End If
+		    Return "error"
+		  End If
+		  
+		  If obj.HasKey("buildError") Then
+		    Var be As JSONItem = obj.Value("buildError")
+		    If be <> Nil And be.HasKey("errors") Then
+		      Var errs As JSONItem = be.Value("errors")
+		      If errs <> Nil And errs.Count > 0 Then Return "error"
+		    End If
+		    If be <> Nil And be.HasKey("warnings") Then
+		      Var warns As JSONItem = be.Value("warnings")
+		      If warns <> Nil And warns.Count > 0 Then Return "warning"
+		    End If
+		    Return "empty"
+		  End If
+		  
+		  If obj.HasKey("missingFiles") Or obj.HasKey("openErrors") Or obj.HasKey("loadError") Then Return "error"
+		  
+		  Return "output"
+		End Function
+	#tag EndMethod
+	#tag Method, Flags = &h0
+		Function ReplyDiagnostics(envelope As JSONItem) As String
+		  /// The reply's blocking diagnostics as readable text, or "" when there are none -
+		  /// that is, when the reply is output, empty, or warnings only. Covers every error
+		  /// shape the IDE is known to send: scriptError (errors only; warnings are for
+		  /// ReplyWarnings), buildError.errors, missingFiles, openErrors and loadError.
+		  ///
+		  /// missingFiles is undocumented but real: an Android build with no key store answers
+		  /// {"missingFiles": "Unable to build. Please specify a Key Store properties file..."},
+		  /// a precise message that used to be dropped as an unrecognised object.
+		  
+		  If ReplyKind(envelope) <> "error" Then Return ""
+		  
+		  Var obj As JSONItem = envelope.Value("response")
+		  Var lines() As String
+		  
+		  If obj.HasKey("scriptError") Then
+		    Var text As String = FormatScriptErrors(obj.Value("scriptError"), False)
+		    If text <> "" Then lines.Add("Script errors:" + EndOfLine + text)
+		  End If
+		  If obj.HasKey("buildError") Then
+		    Var be As JSONItem = obj.Value("buildError")
+		    If be <> Nil And be.HasKey("errors") Then
+		      Var errs As JSONItem = be.Value("errors")
+		      If errs <> Nil And errs.Count > 0 Then
+		        lines.Add("Build errors (" + errs.Count.ToString + "):" + EndOfLine + FormatDiagnosticList(errs, "Error"))
+		      End If
+		    End If
+		  End If
+		  If obj.HasKey("missingFiles") Then
+		    lines.Add("The IDE needs something configured before it can build: " + obj.Value("missingFiles").StringValue)
+		  End If
+		  If obj.HasKey("openErrors") Then
+		    lines.Add("The project reported errors while opening: " + JSONItem(obj.Value("openErrors")).ToString)
+		  End If
+		  If obj.HasKey("loadError") Then
+		    lines.Add("The project could not be loaded: " + JSONItem(obj.Value("loadError")).ToString)
+		  End If
+		  
+		  If lines.Count = 0 Then Return "The IDE returned an error: " + obj.ToString
+		  Return String.FromArray(lines, EndOfLine)
+		End Function
+	#tag EndMethod
+	#tag Method, Flags = &h0
+		Function ReplyWarnings(envelope As JSONItem) As String
+		  /// Warnings carried by the reply - in its primary part or in any part MergeReply
+		  /// attached - as readable text, or "" when there are none. For a successful script
+		  /// this is typically a scriptCompilerWarning about the script XMCP itself sent.
+		  
+		  If envelope = Nil Then Return ""
+		  Var lines() As String
+		  
+		  Var candidates() As JSONItem
+		  If envelope.HasKey("response") And envelope.Value("response").Type <> Variant.TypeString Then
+		    Try
+		      candidates.Add(JSONItem(envelope.Value("response")))
+		    Catch e As RuntimeException
+		    End Try
+		  End If
+		  If envelope.HasKey("xmcp_parts") Then
+		    Var parts As JSONItem = envelope.Value("xmcp_parts")
+		    For i As Integer = 0 To parts.Count - 1
+		      Try
+		        // Only objects. MergeReply attaches the other parts' response VALUES, and
+		        // for a multi-Print script those are plain strings - asking one of those
+		        // HasKey raises, and the exception escaped as a JSON-RPC parse error.
+		        Var child As JSONItem = parts.ChildAt(i)
+		        If child <> Nil And Not child.IsArray Then candidates.Add(child)
+		      Catch e As RuntimeException
+		      End Try
+		    Next i
+		  End If
+		  
+		  For Each obj As JSONItem In candidates
+		    If obj = Nil Or obj.IsArray Then Continue
+		    
+		    // A reply part can be any JSON the IDE chose to send. Reading warnings out of
+		    // one must never fail the whole request: there is nothing to report from a part
+		    // that is not an object, and that is not an error.
+		    Try
+		      If obj.HasKey("scriptError") Then
+		        Var text As String = FormatScriptErrors(obj.Value("scriptError"), True)
+		        If text <> "" Then lines.Add(text)
+		      End If
+		      If obj.HasKey("buildError") Then
+		        Var be As JSONItem = obj.Value("buildError")
+		        If be <> Nil And be.HasKey("warnings") Then
+		          Var warns As JSONItem = be.Value("warnings")
+		          If warns <> Nil And warns.Count > 0 Then lines.Add(FormatDiagnosticList(warns, "Warning"))
+		        End If
+		      End If
+		    Catch e As RuntimeException
+		    End Try
+		  Next obj
+		  
+		  Return String.FromArray(lines, EndOfLine)
+		End Function
+	#tag EndMethod
+	#tag Method, Flags = &h21
+		Private Function FormatScriptErrors(items As JSONItem, warningsOnly As Boolean) As String
+		  /// One line per scriptError entry of the requested severity. The IDE wraps the
+		  /// script in a line of boilerplate before compiling it, so every line number it
+		  /// reports is one greater than the line that was sent; that offset is removed here.
+		  /// A line too small to carry the offset passes through unchanged. Column -1 means
+		  /// unknown and is omitted.
+		  
+		  If items = Nil Then Return ""
+		  Var lines() As String
+		  If Not items.IsArray Then Return items.ToString
+		  
+		  For i As Integer = 0 To items.Count - 1
+		    Var entry As JSONItem = items.ChildAt(i)
+		    If entry = Nil Then Continue
+		    Var kind As String = If(entry.HasKey("type"), entry.Value("type").StringValue, "")
+		    Var isWarning As Boolean = kind.Lowercase.EndsWith("warning")
+		    If isWarning <> warningsOnly Then Continue
+		    
+		    Var text As String = If(kind = "", If(warningsOnly, "Warning", "Error"), kind)
+		    If entry.HasKey("message") Then text = text + ": " + entry.Value("message").StringValue
+		    If entry.HasKey("line") Then
+		      Var line As Integer = entry.Value("line").IntegerValue
+		      If line >= 2 Then line = line - 1
+		      If line > 0 Then text = text + " (line " + line.ToString + ")"
+		    End If
+		    If entry.HasKey("column") Then
+		      Var column As Integer = entry.Value("column").IntegerValue
+		      If column >= 0 Then text = text + " (column " + column.ToString + ")"
+		    End If
+		    lines.Add(text)
+		  Next i
+		  
+		  Return String.FromArray(lines, EndOfLine)
+		End Function
+	#tag EndMethod
+	#tag Method, Flags = &h21
+		Private Function FormatDiagnosticList(list As JSONItem, defaultType As String) As String
+		  /// One line per buildError entry: type, message, location and position.
+		  
+		  If list = Nil Then Return ""
+		  Var lines() As String
+		  For i As Integer = 0 To list.Count - 1
+		    Var err As JSONItem = list.ChildAt(i)
+		    If err = Nil Then Continue
+		    Var errType As String = If(err.HasKey("type"), err.Value("type").StringValue, defaultType)
+		    Var msg As String = If(err.HasKey("message"), err.Value("message").StringValue, "")
+		    Var location As String = If(err.HasKey("location"), err.Value("location").StringValue, "")
+		    Var position As String = If(err.HasKey("position"), err.Value("position").StringValue, "")
+		    Var line As String = errType + ": " + msg
+		    If location <> "" Then line = line + " [" + location + "]"
+		    If position <> "" And position <> location Then line = line + " (" + position + ")"
+		    lines.Add(line)
+		  Next i
+		  Return String.FromArray(lines, EndOfLine)
+		End Function
+	#tag EndMethod
+	#tag Method, Flags = &h21
+		Private Function MergeReply(frames() As JSONItem) As JSONItem
+		  /// Folds the parts of one reply into a single envelope so callers keep reading
+		  /// response.Value("response") as before. The primary part is chosen by weight: an
+		  /// error beats output, output beats a warning, and a warning beats an empty answer -
+		  /// an empty reply carries nothing, so it must never displace a warning. Every other part is attached under "xmcp_parts" (their
+		  /// "response" values) so a tool can still report, say, the compiler warning that
+		  /// accompanied a successful script - see ReplyWarnings.
+		  
+		  If frames.Count = 0 Then Return Nil
+		  If frames.Count = 1 Then Return frames(0)
+		  
+		  Var primary As Integer = -1
+		  Var rank() As String = Array("error", "output", "warning", "empty", "unknown")
+		  For r As Integer = 0 To rank.LastIndex
+		    For i As Integer = 0 To frames.LastIndex
+		      Var kind As String = ReplyKind(frames(i))
+		      If kind = rank(r) Then
+		        // Among outputs, prefer one that actually says something.
+		        If kind = "output" And frames(i).Value("response").Type = Variant.TypeString And _
+		          frames(i).Value("response").StringValue = "" Then Continue
+		        primary = i
+		        Exit For i
+		      End If
+		    Next i
+		    If primary >= 0 Then Exit For r
+		  Next r
+		  If primary < 0 Then primary = 0
+		  
+		  Var merged As JSONItem = frames(primary)
+		  Var parts As New JSONItem("[]")
+		  For i As Integer = 0 To frames.LastIndex
+		    If i = primary Then Continue
+		    If frames(i).HasKey("response") Then parts.Add(frames(i).Value("response"))
+		  Next i
+		  If parts.Count > 0 Then merged.Value("xmcp_parts") = parts
+		  
+		  LogVerbose("Merged " + frames.Count.ToString + " reply parts; primary kind " + ReplyKind(merged) + ".")
+		  Return merged
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub AddPending(sock As IPCSocket, tag As String, script As String)
+		  /// Parks a socket whose request the IDE accepted but has not answered yet.
+		  ///
+		  /// The IDE runs scripts on its main thread, so during a build - or behind a modal
+		  /// dialog - it answers nothing until it is done, and then answers everything that
+		  /// queued up, on the connections the requests arrived on. Closing such a
+		  /// connection is what killed the IDE: its later write hits a closed peer, the
+		  /// kernel raises SIGPIPE, and the Xojo IDE does not ignore that signal. The system
+		  /// log showed "exited due to SIGPIPE | sent by Xojo" five seconds after the build
+		  /// finished, with no crash report. So a timed-out socket stays open here until the
+		  /// IDE has replied or has gone away; DrainPending does the housekeeping.
+		  ///
+		  /// The crash is a macOS/Linux one: there the IPCSocket is a Unix domain socket. On
+		  /// Windows it is a TCP socket on localhost, where a write into a closed peer merely
+		  /// fails. Parking is still right there - a busy IDE accepts the connect into its
+		  /// backlog on both platforms, so the request is delivered either way, and refusing
+		  /// to stack more behind it is what keeps the message honest.
+		  
+		  mPendingSockets.Add(sock)
+		  mPendingTags.Add(tag)
+		  mPendingScripts.Add(script)
+		  mPendingSinceUS.Add(System.Microseconds)
+		End Sub
+	#tag EndMethod
+	#tag Method, Flags = &h0
+		Function DrainPending() As Integer
+		  /// Polls every parked socket and releases the ones the IDE is finished with: it
+		  /// wrote a reply (discarded - the caller gave up long ago), or it closed the
+		  /// connection (the IDE quit or crashed), or the socket has been parked longer
+		  /// than kPendingGiveUpMS. Returns how many are still waiting for the IDE.
+		  
+		  Var i As Integer = mPendingSockets.LastIndex
+		  While i >= 0
+		    Var sock As IPCSocket = mPendingSockets(i)
+		    Var done As Boolean = False
+		    Var reason As String = ""
+		    
+		    Try
+		      sock.Poll
+		      // The only thing the IDE ever writes on this connection is the reply, so any
+		      // byte at all means the request has been executed.
+		      If sock.ReadAll <> "" Then
+		        done = True
+		        reason = "the IDE answered it (reply discarded)"
+		      ElseIf Not sock.IsConnected Then
+		        done = True
+		        reason = "the IDE closed the connection"
+		      ElseIf System.Microseconds - mPendingSinceUS(i) > kPendingGiveUpMS * 1000.0 Then
+		        Var giveUpMinutes As Integer = kPendingGiveUpMS / 60000
+		        done = True
+		        reason = "it was parked for over " + giveUpMinutes.ToString + " minutes"
+		      End If
+		    Catch e As RuntimeException
+		      done = True
+		      reason = "polling it failed: " + e.Message
+		    End Try
+		    
+		    If done Then
+		      LogVerbose("IDE request " + mPendingTags(i) + ": released, " + reason + ".")
+		      Try
+		        sock.Close
+		      Catch e As RuntimeException
+		        // Nothing left to do with it.
+		      End Try
+		      mPendingSockets.RemoveAt(i)
+		      mPendingTags.RemoveAt(i)
+		      mPendingScripts.RemoveAt(i)
+		      mPendingSinceUS.RemoveAt(i)
+		    End If
+		    
+		    i = i - 1
+		  Wend
+		  
+		  Return mPendingSockets.Count
+		End Function
+	#tag EndMethod
+	#tag Method, Flags = &h21
+		Private Function PendingSummary() As String
+		  /// One line per parked request: its tag, how long ago it was sent, and the start
+		  /// of its script - enough to recognise "that was the build I started".
+		  
+		  Var lines() As String
+		  For i As Integer = 0 To mPendingSockets.LastIndex
+		    Var ageS As Integer = Floor((System.Microseconds - mPendingSinceUS(i)) / 1000000.0)
+		    Var preview As String = mPendingScripts(i).ReplaceLineEndings(" ").Trim
+		    If preview.Length > 80 Then preview = preview.Left(77) + "..."
+		    lines.Add("  " + mPendingTags(i) + " (sent " + ageS.ToString + "s ago): " + preview)
+		  Next i
+		  
+		  Return String.FromArray(lines, EndOfLine)
 		End Function
 	#tag EndMethod
 
@@ -392,10 +789,34 @@ Protected Class IDECommunicator
 	#tag EndProperty
 
 
+	#tag Property, Flags = &h21
+		Private mParkedThisRequest As Boolean
+	#tag EndProperty
+	#tag Property, Flags = &h21
+		Private mPendingScripts() As String
+	#tag EndProperty
+	#tag Property, Flags = &h21
+		Private mPendingSinceUS() As Double
+	#tag EndProperty
+	#tag Property, Flags = &h21
+		Private mPendingSockets() As IPCSocket
+	#tag EndProperty
+	#tag Property, Flags = &h21
+		Private mPendingTags() As String
+	#tag EndProperty
+	#tag Constant, Name = kPendingGiveUpMS, Type = Double, Dynamic = False, Default = \"7200000", Scope = Private, Description = 486F77206C6F6E672061207061726B656420736F636B65742069732068656C64206F70656E2077616974696E6720666F72207468652049444520746F20616E737765722C20696E206D696C6C697365636F6E647320283220686F757273292E
+	#tag EndConstant
+	
 	#tag Constant, Name = kConnectTimeoutMS, Type = Double, Dynamic = False, Default = \"1500", Scope = Private
 	#tag EndConstant
 	
 	#tag Constant, Name = kNoListenerPrefix, Type = String, Dynamic = False, Default = \"IPC socket not found", Scope = Private
+	#tag EndConstant
+	
+	#tag Constant, Name = kSplitReplyWindowMS, Type = Double, Dynamic = False, Default = \"250", Scope = Private, Description = 486F77206C6F6E6720746F206B6565702072656164696E6720666F72206D6F726520706172747320616674657220746865206669727374206D61746368696E67207265706C79206672616D652C20696E206D696C6C697365636F6E64732E
+	#tag EndConstant
+	
+	#tag Constant, Name = kSplitWaitForOutputMS, Type = Double, Dynamic = False, Default = \"30000", Scope = Private, Description = 486F77206C6F6E6720746F207761697420666F7220746865207363726970742773207265616C206F7574707574207768656E206F6E6C79206120636F6D70696C6572207761726E696E6720686173206172726976656420736F206661722C20696E206D696C6C697365636F6E64732E
 	#tag EndConstant
 	
 	#tag ViewBehavior
