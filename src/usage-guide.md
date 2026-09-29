@@ -20,7 +20,7 @@ This file is automatically loaded as an MCP resource when you connect to XMCP. I
 
 ## What XMCP can do
 
-XMCP gives you direct control over the Xojo IDE via 31 tools (34 with the opt-in file tools enabled):
+XMCP gives you direct control over the Xojo IDE via 31 tools on macOS and 30 on Windows (34 and 33 with the opt-in file tools enabled). The difference is `get_system_log`, which reads the macOS unified log and is not registered on other platforms:
 
 - **Navigate**: `list_project_items`, `get_current_location`, `select_project_item`
 - **Read/write code**: `get_code`, `set_code`, `get_selected_text`, `set_selected_text`
@@ -38,7 +38,7 @@ XMCP gives you direct control over the Xojo IDE via 31 tools (34 with the opt-in
 
 ### Optional file tools (opt-in)
 
-Three additional tools — `write_file`, `read_file`, and `hash_file` — provide direct filesystem access for MCP clients that lack built-in file tools (e.g. Claude Desktop). They are **disabled by default** and only registered when the server is started with `--enable-file-tools`, bringing the tool count to 34. If your MCP client already has its own file tools (e.g. Claude Code), leave these off — that's the point of the opt-in flag.
+Three additional tools — `write_file`, `read_file`, and `hash_file` — provide direct filesystem access for MCP clients that lack built-in file tools (e.g. Claude Desktop). They are **disabled by default** and only registered when the server is started with `--enable-file-tools`, bringing the tool count to 34 on macOS, 33 on Windows. If your MCP client already has its own file tools (e.g. Claude Code), leave these off — that's the point of the opt-in flag.
 
 When enabled, access is restricted to an allowlist of directories given via `--file-root` as comma-separated absolute paths (default: `/tmp`). Paths are lexically canonicalised (`.`/`..` segments resolved, duplicate slashes collapsed, macOS's symlinked `/tmp`, `/var`, `/etc` mapped to their `/private` equivalents), then resolved through `realpath(3)` and re-normalised before comparison, so a symlink inside an allowed root cannot be used to write outside it. Residual risk: the check and the subsequent file open are separate syscalls, so a symlink swapped in between the two would still escape — Xojo exposes no `openat`-style primitive to close that gap. Requests outside the allowed roots fail with an "Access denied" result.
 
@@ -380,9 +380,71 @@ Keep the fenced block valid JSON. Do not remove keys the tools rely on without u
 
 ## IDE tool limitations to be aware of
 
-### `run_ide_script` shows an empty `Print` result as the literal text `{}`
+### The IDE answers once per `Print` - and not at all without one
 
-If a script's `Print` output is an empty string, `run_ide_script` shows this as the literal two-character text `{}` — that reflects an empty result, not an error. Structured tools that go through the same underlying IDE communication (`list_project_items`, `debug_control`, `constant_value`, etc.) normalize this correctly internally and don't leak `{}` into their own success/failure logic, but their MCP output can still render as an empty-looking result when the underlying value genuinely is empty — that's expected, not a sign of failure.
+Measured against the IDE socket directly on macOS and Windows, both Xojo 2026r2.1:
+
+| Script | Reply |
+|---|---|
+| `Print "one"` | one reply |
+| `Print "one"` then `Print "two"` | **two replies** - XMCP merges them and reports the most significant part |
+| no `Print` | **no reply at all** |
+| `Print ""` | one reply, an empty object |
+| `Print "   "` (only spaces) | the same empty reply - the IDE collapses it; `Print "[   ]"` keeps its spaces |
+
+So **print once**, at the point whose value you want back. Printing twice does not
+concatenate: XMCP merges the replies and reports the most significant part - an error
+outranks printed output, which outranks a warnings-only reply. With two plain `Print`s
+you therefore see the first, but if a later part carries an error that is what you get
+back, so a second `Print` is not a reliable way to return a second value.
+
+A script with no `Print` would never be answered, so XMCP appends one to every request
+before sending and reports "The script ran but produced no value." You do not need to
+add a trailing `Print` yourself. Some commands genuinely have no value to give -
+`PropertyValue` returns nothing for an item it does not support - and that is not a
+failure: verify the effect in a separate call.
+
+Structured tools that go through the same IDE communication (`list_project_items`,
+`constant_value`) normalise an empty reply internally, so an empty-looking result from
+them means the value genuinely is empty. (`debug_control` is the exception: it turns an
+empty reply into a success message - see below.) Because the IDE
+collapses a `Print` of only spaces, `constant_value` cannot return a constant whose
+value is nothing but whitespace - it reads as empty.
+
+Compiler warnings are reported by `run_ide_script` together with the output, because
+the script is yours. Other tools keep warnings about the scripts XMCP generates for
+them out of the result, since that result is data (selected text, a constant's value)
+and a diagnostic appended to it would corrupt it; they mention a warning only when the
+script printed nothing. `debug_control` and `stop_project` report success even when no
+debug session is running - confirm the state another way.
+
+A runtime error in a script comes back without detail: the Xojo IDE gives no message and
+no line number, so XMCP can only say that the script stopped with a runtime error. To find
+where, split the script, or `Print` intermediate values before the line you suspect.
+
+### Every IDE tool has a time limit, and running past it is not a failure
+
+Each tool waits a limited time for the IDE: 10 seconds for `run_ide_script` and most tools,
+five minutes for `analyze_project`, 30 minutes for `build_project` and `run_project`. All
+four of those take a `timeout` argument in milliseconds to change it (a zero or negative
+value means "use the default").
+
+When a request runs past its limit, the IDE is not stopped - it carries on and finishes
+the work - but XMCP stops waiting for the answer and keeps the connection open until it
+arrives (it is *parked*). So a timeout does not mean the build failed, and it does mean the
+next rule below applies. If you know a build or analysis will be long, pass a larger
+`timeout` up front instead of letting it run over.
+
+### While the IDE is still answering a request, do not quit or restart the client
+
+When a request takes longer than its time limit - a long build, or a dialog waiting for a
+click - XMCP keeps its connection to the IDE open until the answer arrives, and turns
+down new requests meanwhile, naming the one that is still waiting. Both messages say not
+to quit or restart Claude Code (or whichever MCP client is in use) until the IDE has
+answered. Take that literally: quitting stops XMCP, which closes the connection, and on
+macOS and Linux the Xojo IDE crashes when it then answers. Tell the user to let the build
+finish or click the dialog, and wait for the refusals to stop. Do not kill XMCP processes
+to "unstick" it - that closes the connection in the same way.
 
 ### Never use `DoCommand "Insert..."` to add controls to windows
 
@@ -495,8 +557,9 @@ Use `analyze_project` to catch errors and warnings without triggering a full bui
 
 - **`scope="project"`** (default) — analyzes the entire project. Use before a build.
 - **`scope="item"`** — analyzes only the currently selected item. Use for a fast check on the item you just edited.
+- **`timeout`** — how long to wait, in milliseconds (default 300000, five minutes). Raise it for a large project.
 
-Warnings return as success (they don't block building). Errors return as failure with a formatted list identical to `build_project` output.
+Warnings return as success (they don't block building). Errors return as failure. Each error line is formatted exactly as `build_project` formats it, but the heading reads "Analysis results (N error(s), M warning(s)):" rather than "Build errors (N):", since no build takes place.
 
 **Recommended pre-build workflow:**
 1. Edit code (direct file edit or `set_code`)
@@ -520,7 +583,7 @@ When a debug session is active (started with `run_project`) and the app is pause
 
 ### build_project uses the IDE's Build Settings
 
-`build_project` takes no parameters — it builds using whatever target platforms the user has configured in the IDE's Build Settings (`BuildMac`, `BuildWin32`, etc.). On success it returns "Build succeeded."; on failure it returns the list of build errors. The success message does not include a path, so to confirm the build location, check the project's `Builds - <ProjectName>/` directory.
+`build_project` takes one optional parameter, `timeout` (see below); which platforms it builds for is not a parameter — it builds using whatever target platforms the user has configured in the IDE's Build Settings (`BuildMac`, `BuildWin32`, etc.). On success it returns "Build succeeded."; on failure it returns the list of build errors. The success message does not include a path, so to confirm the build location, check the project's `Builds - <ProjectName>/` directory.
 
 ### Debug mode vs. built app — exception visibility
 

@@ -184,6 +184,30 @@ Protected Class Tool
 
 
 	#tag Method, Flags = &h1
+		Protected Function TimeoutArg(args() As MCPKit.ToolArgument, defaultMS As Integer) As Integer
+		  /// The tool's "timeout" argument in milliseconds, or defaultMS when it was not given.
+		  ///
+		  /// Four tools read this argument and three of them wrote the check differently.
+		  /// build_project and run_project guarded it inline, analyze_project guarded it after the
+		  /// loop, and run_ide_script did not guard it at all - so a caller passing timeout: 0 got
+		  /// a zero wait, which cannot be met: the request times out immediately and parks its
+		  /// socket, and further requests are then refused until the IDE answers a script nobody
+		  /// is waiting for. A value that cannot be honoured means "I did not choose one", so it
+		  /// falls back to the default rather than being taken literally.
+		  
+		  For Each arg As MCPKit.ToolArgument In args
+		    If arg.Name = "timeout" Then
+		      Var given As Integer = arg.Value.IntegerValue
+		      If given > 0 Then Return given
+		      Return defaultMS
+		    End If
+		  Next arg
+		  
+		  Return defaultMS
+		End Function
+	#tag EndMethod
+
+	#tag Method, Flags = &h1
 		Protected Function BuildStringVariableScript(variableName As String, value As String) As String
 		  // Split on CRLF/CR/LF individually (not just EndOfLine, which is LF-only
 		  // on macOS) so a raw CR embedded in `value` (e.g. from "a\r\nb" or "a\rb")

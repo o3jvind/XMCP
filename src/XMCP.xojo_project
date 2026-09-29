@@ -15,6 +15,7 @@ Class=OptionException;MCPKit/OptionException.xojo_code;&h000000007F941FFF;&h0000
 Class=OptionParser;MCPKit/OptionParser.xojo_code;&h000000000013BFFF;&h000000001571BFFF;false
 Class=Option;MCPKit/Option.xojo_code;&h0000000066AFE7FF;&h000000001571BFFF;false
 Class=IDECommunicator;IDECommunicator.xojo_code;&h000000000CED27FF;&h0000000000000000;false
+Class=PendingRequest;PendingRequest.xojo_code;&h000000003B7A4FFF;&h0000000000000000;false
 Class=SemanticSearch;SemanticSearch.xojo_code;&h000000002A1F8FFF;&h0000000000000000;false
 Class=Docset;Docset.xojo_code;&h000000005E3A9FFF;&h0000000000000000;false
 Module=FormatRules;FormatRules.xojo_code;&h000000003B7C4FFF;&h0000000000000000;false

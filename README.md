@@ -6,7 +6,7 @@ XMCP connects to the Xojo IDE via its IPC socket, all through the standard MCP p
 
 ## What XMCP can do
 
-34 tools in total (31 always on, 3 opt-in) across seven categories — see [Tools](#tools) below for the full reference on each one:
+34 tools in total on macOS and 33 on Windows (31 and 30 always on, plus 3 opt-in; `get_system_log` reads the macOS system log and is not registered on Windows) across seven categories — see [Tools](#tools) below for the full reference on each one:
 
 - **IDE Tools** (19) — navigate, read/write code, build, run, save, analyze, control debug sessions, create items, inspect/modify item descriptions and constants, revert from disk, and run arbitrary IDE scripts
 - **Documentation Tools** (4) — search Xojo's bundled documentation and the user's personal notes, look up class references, list topics
@@ -206,15 +206,19 @@ Replaces the currently selected text in the code editor with new text.
 
 #### `build_project`
 
-Builds the current Xojo project using the IDE's configured Build Settings (the target platforms selected in the IDE). Uses a 120-second timeout for long builds. Returns "Build succeeded." on success, or a formatted list of build errors on failure.
+Builds the current Xojo project using the IDE's configured Build Settings (the target platforms selected in the IDE). Returns "Build succeeded." on success, or a formatted list of build errors on failure.
 
-*No parameters.*
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `timeout` | Integer | No | How long to wait for the build, in milliseconds. Default: 1800000 (30 minutes); zero or negative means the default. Giving up does not stop the IDE: if it takes longer, the request is left waiting (*parked*) until the IDE answers, and you must not quit or restart Claude Code in the meantime - see [When the IDE does not answer](#when-the-ide-does-not-answer). If you expect a long build, pass a longer `timeout` rather than letting it run over. |
 
 #### `run_project`
 
 Runs the current Xojo project in debug mode.
 
-*No parameters.*
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `timeout` | Integer | No | How long to wait for the project to build and launch, in milliseconds. Default: 1800000 (30 minutes); zero or negative means the default. Giving up does not stop the IDE: if it takes longer, the request is left waiting (*parked*) until the IDE answers, and you must not quit or restart Claude Code in the meantime - see [When the IDE does not answer](#when-the-ide-does-not-answer). If you expect a long build before it launches, pass a longer `timeout` rather than letting it run over. |
 
 #### `stop_project`
 
@@ -238,7 +242,7 @@ Executes an arbitrary Xojo IDE script. This is an escape hatch for any IDE scrip
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `script` | String | Yes | The IDE script code to execute. Use `Print` to return output values. |
-| `timeout` | Integer | No | Timeout in milliseconds. Default: 10000 (10 seconds). |
+| `timeout` | Integer | No | How long to wait for the script, in milliseconds. Default: 10000 (10 seconds); zero or negative means the default. Giving up does not stop the IDE: if the script runs longer - or opens a dialog - the request is left waiting (*parked*) until the IDE answers, and you must not quit or restart Claude Code in the meantime - see [When the IDE does not answer](#when-the-ide-does-not-answer). |
 
 #### `get_project_info`
 
@@ -283,6 +287,7 @@ Analyzes the current Xojo project for compile errors and warnings without buildi
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `scope` | String | No | `"project"` (default) — analyze entire project; `"item"` — analyze only the currently selected item. |
+| `timeout` | Integer | No | How long to wait for the analysis, in milliseconds. Default: 300000 (5 minutes); zero or negative means the default. A large project can take longer than the fixed 60 seconds this used to allow. Giving up does not stop the IDE: if it takes longer, the request is left waiting (*parked*) until the IDE answers, and you must not quit or restart Claude Code in the meantime - see [When the IDE does not answer](#when-the-ide-does-not-answer). If you expect a long analysis, pass a longer `timeout` rather than letting it run over. |
 
 #### `debug_control`
 
@@ -447,7 +452,7 @@ Validates a `.xojo_code` or `.xojo_window` file on disk for known structural err
 
 ### File Tools (opt-in)
 
-Direct filesystem access for MCP clients with no file tools of their own (e.g. Claude Desktop). **Disabled by default** — start XMCP with `--enable-file-tools` to register them, bringing the tool count to 34. Access is restricted to an allowlist of directories given via `--file-root` (comma-separated absolute paths, default `/tmp`); see [File tool sandbox](#file-tool-sandbox) below. If your MCP client already has file tools (Claude Code does), leave these off.
+Direct filesystem access for MCP clients with no file tools of their own (e.g. Claude Desktop). **Disabled by default** — start XMCP with `--enable-file-tools` to register them, bringing the tool count to 34 on macOS and 33 on Windows. Access is restricted to an allowlist of directories given via `--file-root` (comma-separated absolute paths, default `/tmp`); see [File tool sandbox](#file-tool-sandbox) below. If your MCP client already has file tools (Claude Code does), leave these off.
 
 #### `write_file`, `read_file`, `hash_file`
 
@@ -517,11 +522,79 @@ XMCP
 XMCP connects to the Xojo IDE via an `IPCSocket` - a Unix domain socket on macOS and Linux, a TCP socket on `localhost` on Windows (see [The transport underneath](#the-transport-underneath)). It uses the **IDE Communicator Protocol v2**, where messages are NUL-terminated JSON objects:
 
 1. On connect, sends `{"protocol": 2}` to upgrade to protocol v2
-2. Requests are sent as `{"tag": "xmcp_1", "script": "Print Location"}`
-3. Responses arrive as `{"tag": "xmcp_1", "response": "App.Constructor"}`
-4. Tags correlate requests with responses for synchronous operation
+2. Requests are sent as `{"tag": "xmcp_3f9a1c2e_1", "script": "Print Location"}`
+3. Responses arrive as `{"tag": "xmcp_3f9a1c2e_1", "response": "App.Constructor"}`
+4. Tags correlate requests with responses for synchronous operation. Each tag is a random part chosen once per XMCP process plus a counter, so no two XMCP processes - a restarted one, or two clients at once - ever use the same tag
 
 The `IDECommunicator` class handles connection management, tag generation, synchronous send/receive with configurable timeouts, and NUL-terminated message framing using direct `IPCSocket` communication.
+
+#### One reply, several messages
+
+A single request can be answered by **several messages under the same tag**. Measured against the IDE socket directly on macOS 15.7.5 and Windows 11, both Xojo 2026r2.1:
+
+| Script | Reply |
+|---|---|
+| `Print "one"` | one frame, `{"response": "one"}` |
+| `Print "one"` then `Print "two"` | **two frames**, one per `Print` |
+| no `Print` at all | **no frame, ever** |
+| `Print ""` | one frame, `{"response": {}}` |
+| `Print "   "` (only whitespace) | the same as `Print ""` - the IDE collapses it; `Print "[   ]"` keeps its spaces |
+
+An answer comes in parts - one per `Print`, then any compiler warning about the script - and the IDE sends each part the moment it is produced. So the parts of one answer can be a millisecond apart or minutes apart: a script that prints, then waits for a build or a dialog, then prints again, goes quiet in between (measured: a `Print`, 232 ms of work, then a second `Print` arrived 232 ms apart). Returning on the first part made the answer whichever part won the race - which is why a successful script sometimes reported only a warning.
+
+XMCP keeps reading until the answer is complete and merges the parts. An error part is the answer, otherwise the output is, then a warning, then an empty reply. The other parts stay attached, which is how a tool reports the warning that *accompanied* a successful script rather than one or the other.
+
+**How XMCP knows the answer is complete.** Not from a pause - a pause only means the script is busy. The `Print` XMCP appends to every script prints a marker unique to that request (`xmcp-end:` and the request's tag), and XMCP never passes the marker on. When the marker arrives, the script has run to its last line, and only a compiler warning can still follow: the IDE sends it just *after* the last `Print`. Measured against the raw socket on 2026r2.1, the warning follows 0.3-0.6 ms later on macOS and 0.03-0.35 ms later on Windows, and a 256 KB answer does not widen that. So after the marker XMCP waits 50 ms more - over 80 times the largest gap measured - and returns. A compile or runtime error ends the answer too, because the IDE stops the script there; XMCP then waits 250 ms after the error. Until one of the two arrives the script is still running, however much of its output has come in, and if the time limit runs out first the request is parked (below) rather than answered. Only a script that ends in a line continuation gets no marker - it cannot compile, so its answer is a compile error in practice - and for it the old rule stays: 250 ms after the first part that is not warnings alone. On an idle machine a typical call went from about 500 ms to about 300 ms; the IDE's own share is about 240 ms.
+
+A reply that has reached its end marker is complete, even if all it holds is a warning - the script printed nothing else.
+
+Because a script with no `Print` never answers, `SendAndReceive` appends one - the end-marker `Print` above - to every request before sending - in the transport rather than in each tool, so no tool can forget and a caller-supplied script cannot reintroduce the failure. Without it the request times out, its socket is parked as though the IDE were busy, and every later request is refused until the give-up timer expires - one `Print`-less script would block the session. An empty or whitespace-only script gets it too.
+
+It is skipped in exactly one case: when the script's last line of code ends in a line continuation, where the appended line would be absorbed into it. Such a script cannot compile, and a compile error is itself a reply, so it cannot park. Deciding that is not "the last character is an underscore": measured on 2026r2.1, a comment can end in one (`// rename to foo_` is not a continuation), a name can end in one (`Var foo_ As Integer` is legal), and the space before it is optional (`+_` continues exactly like `+ _`). So a trailing comment is removed first - `'` or `//` outside a string literal, or a `Rem` line - and the underscore counts only when it does not end a name. When the test is unsure it appends: an appended sentinel can only change the compile error of a script that could not compile anyway, whereas a skipped one leaves a valid script unanswered.
+
+The reply shapes XMCP recognises: a string (what the script printed), an empty object (it printed an empty string), `scriptError` - a **heterogeneous** array whose entries are `scriptCompilerError`, `scriptRuntimeError` or `scriptCompilerWarning`, so a warnings-only array means the script ran - and `buildError` with `errors` and `warnings`, plus `missingFiles`, `openErrors` and `loadError`. Every one of these keys in a reply is looked at, and a reply counts as clean only if none of them reports anything. A `buildError` counts as clean or as warnings only in the shape the IDE sends - an `errors` list, a `warnings` list, or both; any other shape is reported as an error, shown as it arrived, rather than being taken for a successful build. `openErrors` is not always an error: opening a project saved by an older Xojo answers with one whose entry says `"severity":"warning"` (an "IDE Version Conflict"), and the project does open. So an `openErrors` result counts as a warning only when it has exactly that measured shape - every entry holds only objects, and each object says severity "warning" and holds only plain values - and as an error otherwise, shown as it arrived. The rule is deliberately narrow: only one such result has been seen, passing a real error off as a warning is the worse mistake, and this way everything accepted as a warning can be shown in full. Script error line numbers are reported one lower than the IDE sends them, because the IDE wraps every script in a line of boilerplate before compiling it. A runtime error is sent with an empty message and line 0; XMCP says so in words rather than showing the bare error type.
+
+**Every IDE tool reads a reply through the same classifier** - `ReplyKind`, `ReplyDiagnostics` and `ReplyWarnings` in `IDECommunicator`. `run_ide_script`, `build_project`, `run_project` and `analyze_project` call it directly; fourteen more go through `RunScript` - `set_code`, `constant_value`, `get_code`, `select_project_item` and nine others, plus `get_project_info`; `revert_project` uses `ReplyDiagnostics` for its own checks, and three of its helpers otherwise only confirm that a reply is a string, treating anything else as "could not read it". Before this, `RunScript` failed on any `scriptError` - warnings included - with a raw JSON dump, `get_project_info` reported one as *success*, and `revert_project` kept a private copy that treated a warning as an error.
+
+Warnings surface differently depending on whose script it is. `run_ide_script` sends the caller's own script, so a warning is about their code and is reported with the output. The other tools send scripts XMCP generates, so a warning is a flaw in XMCP rather than anything the caller can act on - `get_selected_text`, for one, draws a precision warning on every call from its own `Str()` - and for most of them the result *is* data: selected text, a constant's value, a list of items. Appending a diagnostic would corrupt it. Those tools therefore report a warning only when the script printed nothing, and log it otherwise.
+
+Two comparison rules follow from the same distinction. A tool's own guard clause prints exactly `ERROR:` at the very start, so `RunScript` tests for that prefix case-sensitively and untrimmed - `BeginsWith` is case-insensitive by default in this Xojo version, and data that merely begins `Error:` is data. And emptiness is tested exactly wherever the value is data (`MergeReply`, `RunScript`, `run_ide_script`), but trimmed where it is a protocol reply (`build_project`, `run_project`, `analyze_project` judging whether a build printed an error or nothing). With the IDE collapsing whitespace-only output itself, neither choice changes a reachable result today; the rule is there so that a future change does not have to rediscover it.
+
+#### When the IDE does not answer
+
+The IDE runs scripts one at a time on its main thread, so during a build - or behind a modal dialog - it answers nothing until it is done, then answers everything that queued up, on the connections the requests arrived on.
+
+A socket whose request timed out is therefore **not closed**. On macOS and Linux the IPCSocket is a Unix domain socket, and the IDE's later write into a closed peer raises `SIGPIPE`, which the Xojo IDE does not ignore: it dies mid-build, with no crash report. The socket is parked open instead, and released once its answer is complete, by the same test as above - its end marker, or an error that stopped the script, or for a script with no marker a part that is not warnings alone - **and nothing more has arrived for 250 ms**; or once the IDE has closed the connection, or it can no longer be read from, or it has been parked for two hours. A pause on its own does not release it: a script waiting on a second dialog is still running, and a part meant for another request says nothing about this one.
+
+Whenever there is a chance the IDE has already received the request, XMCP keeps the connection open and does not send the request again - sending it again could make the IDE run the same script twice. That covers a request that times out - including one whose output has started to arrive but whose script has not finished - an answer that turns out to belong to a different request, a connection that fails while XMCP is reading from it, and a request that fails halfway through being sent. If the IDE closes the connection before it has finished answering, XMCP stops waiting at once instead of at the time limit, and does not send the request again either: the IDE may already have run it. (On macOS, retrying "on another path" would usually reach the very same IDE, because two of the paths XMCP tries, `/tmp` and `/private/tmp`, are the same place.)
+
+**Quitting Claude Code while a request is parked can crash the Xojo IDE.** A request is *parked* when the IDE takes longer than XMCP's time limit to answer it: instead of closing the connection, XMCP keeps it open until the answer arrives, for the reason above. Quitting or restarting Claude Code stops XMCP, stopping XMCP closes that connection, and when the IDE finally answers over the closed connection, it crashes. So before you quit or restart, let the IDE finish - wait for the build, or click the dialog. The message XMCP gives when a request is parked, and the one it gives when it turns down a new request because one is still parked, both say this. The AI in your session reads those messages, so it can remind you.
+
+XMCP cannot yet prevent this itself. We tested the two ways a program can stop it:
+
+1. **Claude Code stops XMCP with a signal.** Claude Code's own logs show that it stops a server by first sending it an interrupt signal. XMCP stops at once on that, so it has no chance to wait for the IDE. (The same logs show that when another server was still running a tenth of a second later, Claude Code followed up with a termination signal; XMCP has never needed the second one.)
+2. **XMCP does not notice when a program simply stops talking to it.** Some programs stop a server not with a signal but by closing the connection they send it requests on. We tested this on macOS: XMCP does not notice, and carries on running until something else stops it. So there is no moment there for it to step in and wait either. This is an older problem, unrelated to the IDE work, listed below to be fixed on its own.
+
+We did try adding a wait at the point where XMCP shuts down, and took it out again. The tests above showed that point is never reached, so the code could never run, and leaving it in would have suggested a protection that does not exist.
+
+While one request is parked, new ones are turned down rather than sent, and the message names the request that is still waiting. A new request sent behind a busy IDE would only time out too, and the error would wrongly say the IDE did not answer, when in fact it is still working.
+
+#### Decisions and known limits
+
+The choices made in this work, and the problems we know about and have deliberately left for later.
+
+- **A slow request's connection is kept open, not closed.** Closing it while the IDE is still working is what used to crash the IDE. The cost is that while it is held, no other program can talk to the IDE, because the IDE accepts only one connection at a time. To keep that short, XMCP checks for the answer continuously whenever it is otherwise idle, not only when the next request comes in.
+- **After two hours XMCP gives up and closes the connection anyway.** If the IDE answers after that - a build longer than two hours, or a dialog left open all afternoon - it will crash. Without a limit, a request the IDE never answers would block every other program from the IDE for as long as XMCP runs. Two hours is longer than any build we have seen.
+- **Once an answer is complete, the connection is closed.** Complete means its end marker has arrived, or an error that stopped the script. After the marker XMCP waits 50 ms for the compiler warning the IDE sends just after it; if a warning ever came later than that, the IDE would be writing to a closed connection. The largest gap measured is 0.6 ms. The alternative, keeping every connection open after it has been answered, would block other programs after every request.
+- **Errors still take the longer wait.** A compile or runtime error stops the script before the end marker, so XMCP waits 250 ms after the error before closing. They could stop early too - measured, a runtime error and any warning arrive together in one frame - but errors are the uncommon case, and it is left as a possible improvement rather than widening this change.
+- **A value that really begins with `ERROR:` reads as a failure.** The tools' guard clauses signal a failure by printing `ERROR:` at the start of their output, so a constant, description or selected text whose own value starts with exactly `ERROR:` - capitals, colon, at the very start - is reported as a failure too. `Error:` or anything else is data. Telling the two apart would mean changing how each of those tools reports a failure, which is outside this change.
+- **While one request is waiting, new ones are turned down, not queued.** A queued request would only time out behind the slow one and report the wrong reason. The refusal names the request that is still waiting.
+- **Quitting Claude Code while a request is waiting is warned against, not prevented.** The section above explains why prevention is not possible yet.
+- **For later consideration (A′): let XMCP survive Claude Code's stop signals while a request is waiting.** XMCP could ask the operating system to ignore those two signals for as long as a request is waiting, and go back to normal as soon as the IDE answers. We have not done it because we do not know what Claude Code does when a program ignores its stop signals. If it then force-stops XMCP, nothing is lost compared with today. If it gives up and carries on, the IDE is protected. But if it waits for XMCP to finish, quitting Claude Code would seem to freeze until the IDE answers - possibly for up to two hours, which is worse than the crash. That has to be tested before deciding. It also only works once XMCP can tell that Claude Code has gone (the next point); otherwise it would never know when to finish and exit.
+- **To fix separately: XMCP does not notice when the connection it receives requests on is closed.** It then keeps running indefinitely after being stopped that way. It predates this work, and fixing it is a precondition for A′.
+- **Windows keeps the same precautions, although the IDE does not crash there.** On Windows XMCP reaches the IDE over a local network connection instead of a socket file. Tested on 2026r2.1: with XMCP killed while a request was waiting, the IDE answered into the closed connection and carried on - same process, still answering scripts - both for a short answer and for a 256 KB one. That is why the warnings say "macOS and Linux". The precautions stay anyway: an answer owed to a connection that has gone away is handed to the *next* client that connects, ahead of that client's own answer and with its original tag (measured against the raw socket), so keeping the waiting connection open is what keeps a late answer where it belongs, and turning new requests down while the IDE is busy is right on every platform. Tags are unique per XMCP process for the same reason: with the old per-process counter, a second XMCP's first request took the first one's late answer for its own - reproduced on Windows - and with unique tags the same test returns the right answer.
+- **Some cases cannot be tested from outside, so they were checked by reading the code.** An answer arriving for a different request, a connection failing while XMCP is reading from it, and a request failing halfway through being sent cannot be made to happen on demand. In each case XMCP now keeps the connection open and does not resend the request - the same behaviour the timeout tests check on both platforms.
+- **`debug_control` and `stop_project` report success even when no debug session is running.** That was already so before this work, is unchanged by it, and belongs with a later change to the run, build and stop tools.
 
 For each IDE request, XMCP tries the last successful socket path first, then every candidate path for the platform. If all attempts fail, the tool returns a detailed connection/timeout error naming every path it tried.
 
