@@ -2,7 +2,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that gives AI assistants direct control over the [Xojo IDE](https://www.xojo.com). Built in Xojo using [MCPKit](https://github.com/gkjpettet/MCPKit) by Garry Pettet.
 
-XMCP connects to the Xojo IDE via its IPC socket, all through the standard MCP protocol over stdin/stdout.
+XMCP connects to the Xojo IDE via its IPC socket, all through the standard MCP protocol over stdin/stdout. It runs on macOS and Windows, both tested with Xojo 2026r2.1.
 
 ## What XMCP can do
 
@@ -22,15 +22,17 @@ XMCP also ships a `usage-guide.md` file next to the binary, exposed as an MCP re
 
 ## Requirements
 
-- **Xojo IDE** available for IDE tools (its IPC socket path is discovered automatically; see [IDE Communication](#ide-communication))
-- **macOS or Windows** - both are supported. On Windows the socket resolves under `%LOCALAPPDATA%\Temp` and `get_system_log` is unavailable (see [Known Limitations](#known-limitations)); Linux is untested
+- **macOS or Windows** - both are supported and tested with Xojo 2026r2.1. Every tool works on both except `get_system_log`, which reads the macOS system log (see [Known Limitations](#known-limitations)). Linux is untested
+- **Xojo IDE** available for IDE tools (its IPC socket path is discovered automatically on both platforms; see [IDE Communication](#ide-communication))
 - **Xojo documentation** (optional) - install via **Xojo IDE → Preferences → General → Install Local Documentation**, then auto-detected by XMCP
 
 ## Installation
 
 1. Open `src/XMCP.xojo_project` in the Xojo IDE
 2. Build the project (Build > Build)
-3. Note the path to the built `XMCP` binary
+3. Note the path to the built `XMCP` binary (`XMCP.exe` on Windows)
+
+The examples below use a macOS-style `/path/to/XMCP`. On Windows, point `command` at `XMCP.exe` instead, and double every backslash inside JSON: `"command": "C:\\Users\\you\\XMCP\\XMCP.exe"`.
 
 ### Configure your MCP client
 
