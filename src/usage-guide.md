@@ -507,6 +507,7 @@ Recommended flow: `list_docsets` → `search_docset` (optionally scoped) → `ge
 - `SelectProjectItem` returns a Boolean — always capture the return value: `Dim r As Boolean = SelectProjectItem("Window1")`
 - `GetProjectItem` does not exist in the IDE scripting language — using it causes a compile error
 - Avoid declaring variables as `ProjectItem` — it is a method name in the scripting language, not a type
+- **Never leave a script early with `Return`.** XMCP marks the end of every answer with a `Print` it appends as the script's last line; a top-level `Return` compiles and ends the script before that line runs, so the answer is never recognised as complete. The request then parks and every later request is turned down until the two-hour give-up. Use `If ... Else ... End If` so the script always runs to its last line.
 
 ### Parallel tool calls are not supported
 
